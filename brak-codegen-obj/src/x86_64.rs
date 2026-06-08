@@ -108,6 +108,7 @@ struct PendingReloc {
 pub fn emit_text(program: &LirProgram) -> Result<(Vec<u8>, Vec<Reloc>, Vec<LineEntry>), CodegenError> {
     let mut func_labels: HashMap<String, CodeLabel> = HashMap::new();
     let mut block_labels: HashMap<(String, usize), CodeLabel> = HashMap::new();
+    let mut block_name_labels: HashMap<(String, String), CodeLabel> = HashMap::new();
 
     let mut buf = Vec::new();
     let mut all_relocs = Vec::new();
@@ -116,7 +117,7 @@ pub fn emit_text(program: &LirProgram) -> Result<(Vec<u8>, Vec<Reloc>, Vec<LineE
 
     for func in &program.functions {
         let mut func_lines = Vec::new();
-        let (code, relocs) = emit_function(func, &mut func_labels, &mut block_labels, &mut func_lines)?;
+        let (code, relocs) = emit_function(func, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut func_lines)?;
         for entry in &mut func_lines {
             entry.offset += current_offset;
         }
@@ -135,6 +136,7 @@ pub fn emit_function(
     func: &brak_ir_lir::lir::LirFunction,
     func_labels: &mut HashMap<String, CodeLabel>,
     block_labels: &mut HashMap<(String, usize), CodeLabel>,
+    block_name_labels: &mut HashMap<(String, String), CodeLabel>,
     line_entries: &mut Vec<LineEntry>,
 ) -> Result<(Vec<u8>, Vec<Reloc>), CodegenError> {
     let mut a = CodeAssembler::new(64)?;
@@ -145,7 +147,9 @@ pub fn emit_function(
 
     func_labels.insert(func.name.clone(), a.create_label());
     for block in &func.blocks {
-        block_labels.insert((func.name.clone(), block.id), a.create_label());
+        let label = a.create_label();
+        block_labels.insert((func.name.clone(), block.id), label.clone());
+        block_name_labels.insert((func.name.clone(), block.name.clone()), label);
     }
 
     let flabel = func_labels.get_mut(&func.name).ok_or_else(|| {
@@ -178,16 +182,30 @@ pub fn emit_function(
             CodegenError::InvalidLabel(format!("block label '{}.{}' not found", func.name, block.id))
         })?;
         a.set_label(blabel)?;
+
+        // Ensure every block has at least one instruction to anchor the label.
+        // If the block is empty or contains only non-emitting opcodes (like Comment),
+        // we add a NOP.
+        let mut emitted = false;
         for inst in &block.insts {
             let before = a.instructions().len();
-            emit_inst(&mut a, inst, block_labels, func_labels, &func.name, &mut pending_relocs)?;
+            emit_inst(&mut a, inst, block_labels, block_name_labels, func_labels, &func.name, &mut pending_relocs)?;
             let after = a.instructions().len();
+            if after > before {
+                emitted = true;
+            }
             lir_sizes.push(after - before);
             if inst.debug.start.line > 0 || inst.debug.start.offset > 0 {
                 lir_line_map.push((inst.debug.start.line, inst.debug.start.column, inst.file_id, false));
             } else {
                 lir_line_map.push((0, 0, 0, false));
             }
+        }
+
+        if !emitted {
+            a.nop()?;
+            lir_sizes.push(1);
+            lir_line_map.push((0, 0, 0, false));
         }
     }
 
@@ -261,9 +279,10 @@ pub fn vreg_ptr(reg: usize) -> iced_x86::code_asm::AsmMemoryOperand {
 fn emit_inst(
     a: &mut CodeAssembler,
     inst: &LirInst,
-    block_labels: &HashMap<(String, usize), CodeLabel>,
-    func_labels: &HashMap<String, CodeLabel>,
-    current_func: &str,
+    block_labels: &mut HashMap<(String, usize), CodeLabel>,
+    block_name_labels: &mut HashMap<(String, String), CodeLabel>,
+    func_labels: &mut HashMap<String, CodeLabel>,
+    func_name: &String,
     pending_relocs: &mut Vec<PendingReloc>,
 ) -> Result<(), CodegenError> {
     match inst.opcode {
@@ -329,47 +348,52 @@ fn emit_inst(
         }
 
         LirOpcode::Jmp => {
-            if let [LirOperand::Label(target)] = &inst.operands[..] {
-                let id_str = target.strip_prefix("block_").ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("Jmp target '{target}' must start with 'block_'"))
-                })?;
-                let id: usize = id_str.parse().map_err(|_| {
-                    CodegenError::InvalidLabel(format!("Jmp target '{target}' has invalid block id"))
-                })?;
-                let label = block_labels.get(&(current_func.to_string(), id)).ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("block '{}.{}' not found", current_func, id))
-                })?;
-                a.jmp(*label)?;
+            if let Some(LirOperand::Label(target)) = inst.operands.first() {
+                // 1. Try numeric ID (block_N)
+                if let Some(target_id) = target.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                    let key = (func_name.clone(), target_id);
+                    let label = block_labels.get_mut(&key).ok_or_else(|| {
+                        CodegenError::InvalidLabel(format!("target block ID '{target}' not found"))
+                    })?;
+                    a.jmp(label.clone())?;
+                } 
+                // 2. Try raw name
+                else if let Some(label) = block_name_labels.get_mut(&(func_name.clone(), target.clone())) {
+                    a.jmp(label.clone())?;
+                }
+                else {
+                    return Err(CodegenError::InvalidLabel(format!("Jmp target '{target}' not found as ID or name")));
+                }
             }
         }
 
         LirOpcode::Br => {
             if let [LirOperand::Reg(cond), LirOperand::Label(then_label), LirOperand::Label(else_label)] = &inst.operands[..] {
-                let then_id_str = then_label.strip_prefix("block_").ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("Br then target '{then_label}' must start with 'block_'"))
-                })?;
-                let then_id: usize = then_id_str.parse().map_err(|_| {
-                    CodegenError::InvalidLabel(format!("Br then target '{then_label}' has invalid block id"))
-                })?;
-                let else_id_str = else_label.strip_prefix("block_").ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("Br else target '{else_label}' must start with 'block_'"))
-                })?;
-                let else_id: usize = else_id_str.parse().map_err(|_| {
-                    CodegenError::InvalidLabel(format!("Br else target '{else_label}' has invalid block id"))
-                })?;
-
                 a.mov(rax, vreg_ptr(*cond))?;
                 a.test(rax, rax)?;
 
-                let then_lbl = block_labels.get(&(current_func.to_string(), then_id)).ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("block '{}.{}' not found", current_func, then_id))
-                })?;
-                let else_lbl = block_labels.get(&(current_func.to_string(), else_id)).ok_or_else(|| {
-                    CodegenError::InvalidLabel(format!("block '{}.{}' not found", current_func, else_id))
-                })?;
+                // Resolve then label
+                let t_label = {
+                    let lbl = if let Some(target_id) = then_label.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                        block_labels.get_mut(&(func_name.clone(), target_id))
+                    } else {
+                        block_name_labels.get_mut(&(func_name.clone(), then_label.clone()))
+                    }.ok_or_else(|| CodegenError::InvalidLabel(format!("Br then target '{then_label}' not found")))?;
+                    lbl.clone()
+                };
 
-                a.jnz(*then_lbl)?;
-                a.jmp(*else_lbl)?;
+                // Resolve else label
+                let e_label = {
+                    let lbl = if let Some(target_id) = else_label.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                        block_labels.get_mut(&(func_name.clone(), target_id))
+                    } else {
+                        block_name_labels.get_mut(&(func_name.clone(), else_label.clone()))
+                    }.ok_or_else(|| CodegenError::InvalidLabel(format!("Br else target '{else_label}' not found")))?;
+                    lbl.clone()
+                };
+
+                a.jnz(t_label)?;
+                a.jmp(e_label)?;
             }
         }
 
@@ -474,7 +498,7 @@ fn emit_inst(
                 }
             }
 
-            if callee == current_func {
+            if callee == *func_name {
                 if let Some(label) = func_labels.get(&callee) {
                     a.call(label.clone())?;
                 } else {

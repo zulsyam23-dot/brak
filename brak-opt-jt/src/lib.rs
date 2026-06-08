@@ -20,35 +20,38 @@ impl LirOptimizationPass for JumpThreading {
 
 fn optimize_function(func: &mut LirFunction) {
     // 1. Identifikasi "Empty Jump Blocks" (blok yang hanya berisi Jmp)
-    let mut jump_map: HashMap<String, String> = HashMap::new();
+    // Map: From Block ID -> To Block ID
+    let mut jump_map: HashMap<usize, usize> = HashMap::new();
     
     for block in &func.blocks {
         if block.insts.len() == 1 {
             let inst = &block.insts[0];
             if inst.opcode == LirOpcode::Jmp {
                 if let Some(LirOperand::Label(target)) = inst.operands.first() {
-                    // Jangan memetakan ke diri sendiri (loop tak hingga)
-                    if target != &block.name {
-                        jump_map.insert(block.name.clone(), target.clone());
+                    // Ekstrak ID dari "block_N"
+                    if let Some(target_id) = target.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                        if target_id != block.id {
+                            jump_map.insert(block.id, target_id);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Resolusi rekursif (jika A -> B dan B -> C, maka A -> C)
-    let mut final_jump_map: HashMap<String, String> = HashMap::new();
-    for (start, _) in &jump_map {
-        let mut current = start;
+    // Resolusi rekursif
+    let mut final_jump_map: HashMap<usize, usize> = HashMap::new();
+    for (&start_id, _) in &jump_map {
+        let mut current_id = start_id;
         let mut visited = std::collections::HashSet::new();
-        visited.insert(current.clone());
+        visited.insert(current_id);
 
-        while let Some(next) = jump_map.get(current) {
-            if !visited.insert(next.clone()) { break; } // Siklus terdeteksi
-            current = next;
+        while let Some(&next_id) = jump_map.get(&current_id) {
+            if !visited.insert(next_id) { break; }
+            current_id = next_id;
         }
-        if current != start {
-            final_jump_map.insert(start.clone(), current.clone());
+        if current_id != start_id {
+            final_jump_map.insert(start_id, current_id);
         }
     }
 
@@ -58,8 +61,10 @@ fn optimize_function(func: &mut LirFunction) {
             if inst.opcode == LirOpcode::Jmp || inst.opcode == LirOpcode::Br {
                 for op in &mut inst.operands {
                     if let LirOperand::Label(name) = op {
-                        if let Some(final_target) = final_jump_map.get(name) {
-                            *name = final_target.clone();
+                        if let Some(target_id) = name.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                            if let Some(&final_target_id) = final_jump_map.get(&target_id) {
+                                *name = format!("block_{}", final_target_id);
+                            }
                         }
                     }
                 }

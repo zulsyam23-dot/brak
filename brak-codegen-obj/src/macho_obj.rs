@@ -148,6 +148,7 @@ fn build_symtab(program: &LirProgram, strtab: &str, relocs: &[Reloc]) -> Result<
 
     let mut func_labels = std::collections::HashMap::new();
     let mut block_labels = std::collections::HashMap::new();
+    let mut block_name_labels = std::collections::HashMap::new();
 
     // Internal functions
     for func in &program.functions {
@@ -159,7 +160,7 @@ fn build_symtab(program: &LirProgram, strtab: &str, relocs: &[Reloc]) -> Result<
         buf.extend_from_slice(&text_off.to_le_bytes()); // n_value
 
         let mut dummy_lines = Vec::new();
-        let (code, _) = emit_function(func, &mut func_labels, &mut block_labels, &mut dummy_lines)?;
+        let (code, _) = emit_function(func, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut dummy_lines)?;
         text_off += code.len() as u64;
     }
 
