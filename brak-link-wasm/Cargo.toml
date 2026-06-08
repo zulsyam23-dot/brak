@@ -1,0 +1,8 @@
+[package]
+name = "brak-link-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-link-traits = { path = "../brak-link-traits" }

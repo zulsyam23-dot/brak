@@ -1,0 +1,10 @@
+[package]
+name = "brak-ir-hir"
+version = "0.1.0"
+edition = "2021"
+description = "Brak High-level IR: desugared, type-checked, name-resolved"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-ast = { path = "../brak-ir-ast" }
+serde = { version = "1", features = ["derive"] }

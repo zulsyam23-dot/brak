@@ -1,0 +1,10 @@
+[package]
+name = "brak-frontend"
+version = "0.1.0"
+edition = "2021"
+description = "Brak frontend: Lexer trait + sample lexer"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-ast = { path = "../brak-ir-ast" }
+serde = { version = "1", features = ["derive"] }

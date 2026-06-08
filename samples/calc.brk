@@ -1,0 +1,22 @@
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn sub(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+fn mul(a: i32, b: i32) -> i32 {
+    a * b
+}
+
+fn div(a: i32, b: i32) -> i32 {
+    a / b
+}
+
+fn main() -> i32 {
+    let x: i32 = add(10, 20);
+    let y: i32 = sub(x, 5);
+    let z: i32 = mul(y, 2);
+    z
+}

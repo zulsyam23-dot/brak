@@ -1,0 +1,3 @@
+fn main() {
+    return undefined_variable + 1;
+}

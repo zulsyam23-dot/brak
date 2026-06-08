@@ -1,0 +1,2 @@
+// LitLang library called by Brak
+fn greet(name: String) -> I32 = 42;

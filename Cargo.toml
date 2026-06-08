@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "brak-core",
+    "brak-frontend",
+    "brak-ir-ast",
+    "brak-ir-hir",
+    "brak-ir-mir",
+    "brak-ir-lir",
+    "brak-codegen-traits",
+    "brak-codegen-asm",
+    "brak-codegen-obj",
+    "brak-codegen-c",
+    "brak-codegen-wasm",
+    "brak-codegen-llvm",
+    "brak-link-traits",
+    "brak-link-native",
+    "brak-tool", "brak-link-archive", "brak-link-wasm", "brak-bitcode", "brak-opt-traits", "brak-opt-dce", "brak-opt-cp", "brak-opt-gvn", "brak-opt-inline", "brak-opt-custom-example", "brak-test", "brak-polyglot", "brak-lang-lit", "brak-opt-utils", "brak-opt-licm",
+    "brak-opt-jt", "brak-opt-tco", "brak-opt-fold",
+]

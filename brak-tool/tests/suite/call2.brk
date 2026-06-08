@@ -1,0 +1,7 @@
+fn add(a, b) {
+    return 99;
+}
+
+fn main() {
+    return add(40, 2);
+}

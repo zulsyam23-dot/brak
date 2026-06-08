@@ -1,0 +1,44 @@
+[package]
+name = "brak-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Brak CLI tool"
+
+[[bin]]
+name = "brak"
+path = "src/main.rs"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-frontend = { path = "../brak-frontend" }
+brak-ir-ast = { path = "../brak-ir-ast" }
+brak-ir-hir = { path = "../brak-ir-hir" }
+brak-ir-mir = { path = "../brak-ir-mir" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-codegen-traits = { path = "../brak-codegen-traits" }
+brak-codegen-asm = { path = "../brak-codegen-asm" }
+brak-codegen-obj = { path = "../brak-codegen-obj" }
+brak-codegen-c = { path = "../brak-codegen-c" }
+brak-codegen-wasm = { path = "../brak-codegen-wasm" }
+brak-codegen-llvm = { path = "../brak-codegen-llvm" }
+brak-link-traits = { path = "../brak-link-traits" }
+brak-link-native = { path = "../brak-link-native" }
+brak-link-wasm = { path = "../brak-link-wasm" }
+brak-bitcode = { path = "../brak-bitcode" }
+brak-opt-traits = { path = "../brak-opt-traits" }
+brak-opt-dce = { path = "../brak-opt-dce" }
+brak-opt-cp = { path = "../brak-opt-cp" }
+brak-opt-gvn = { path = "../brak-opt-gvn" }
+brak-opt-inline = { path = "../brak-opt-inline" }
+brak-opt-licm = { path = "../brak-opt-licm" }
+brak-opt-jt = { path = "../brak-opt-jt" }
+brak-opt-tco = { path = "../brak-opt-tco" }
+brak-opt-fold = { path = "../brak-opt-fold" }
+brak-polyglot = { path = "../brak-polyglot" }
+brak-lang-lit = { path = "../brak-lang-lit" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+brak-test = { path = "../brak-test" }

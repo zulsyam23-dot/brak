@@ -1,0 +1,12 @@
+[package]
+name = "brak-codegen-traits"
+version = "0.1.0"
+edition = "2021"
+description = "CodegenBackend trait for Brak code generation"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("unstable"))'] }

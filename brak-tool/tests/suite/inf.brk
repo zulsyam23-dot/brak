@@ -1,0 +1,7 @@
+fn myfn() {
+    return 0;
+}
+
+fn main() {
+    return myfn();
+}

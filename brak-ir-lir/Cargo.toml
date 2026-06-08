@@ -1,0 +1,10 @@
+[package]
+name = "brak-ir-lir"
+version = "0.1.0"
+edition = "2021"
+description = "Brak Low-level IR: register-based, machine-near opcodes"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-mir = { path = "../brak-ir-mir" }
+serde = { version = "1", features = ["derive"] }

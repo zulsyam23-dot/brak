@@ -1,0 +1,10 @@
+fn recurse(x) {
+    if x <= 0 {
+        return 0;
+    }
+    return recurse(0);
+}
+
+fn main() {
+    return recurse(3);
+}

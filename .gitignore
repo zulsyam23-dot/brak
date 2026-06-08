@@ -1,0 +1,16 @@
+/target/
+*.exe
+*.o
+*.obj
+*.pdb
+*.d
+*.rlib
+/brak-tool/tests/suite/*.exe
+/brak-tool/tests/suite/*.obj
+/samples/*.exe
+/samples/*.obj
+laporan*.md
+!laporan.md
+ERROR_HANDLING_*.md
+test.brk
+calc

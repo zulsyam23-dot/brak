@@ -1,0 +1,12 @@
+[package]
+name = "brak-codegen-asm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-codegen-traits = { path = "../brak-codegen-traits" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("unstable"))'] }

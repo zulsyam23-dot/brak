@@ -1,0 +1,13 @@
+fn main() {
+    let x = 0;
+    let i = 0;
+    while i < 5 {
+        if i % 2 == 0 {
+            x = x + i;
+        } else {
+            x = x + 1;
+        }
+        i = i + 1;
+    }
+    return x; // 0 + 1 + 2 + 1 + 4 = 8
+}

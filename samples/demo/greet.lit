@@ -1,0 +1,4 @@
+// LitLang library: greeting function
+// Called by main.brk via extern "C"
+
+fn greet(name: String) -> I32 = 42;

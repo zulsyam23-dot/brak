@@ -1,0 +1,9 @@
+[package]
+name = "brak-core"
+version = "0.1.0"
+edition = "2021"
+description = "Brak core types: Span, SourceMap, Diagnostic, ContentHash"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

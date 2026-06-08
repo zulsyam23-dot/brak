@@ -1,0 +1,10 @@
+[package]
+name = "brak-polyglot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-ast = { path = "../brak-ir-ast" }
+brak-ir-hir = { path = "../brak-ir-hir" }
+serde = { version = "1", features = ["derive"] }

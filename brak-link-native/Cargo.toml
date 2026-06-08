@@ -1,0 +1,12 @@
+[package]
+name = "brak-link-native"
+version = "0.1.0"
+edition = "2021"
+description = "Native linker: ELF, PE, Mach-O"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-link-traits = { path = "../brak-link-traits" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("unstable"))'] }

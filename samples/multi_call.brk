@@ -1,0 +1,8 @@
+fn main() {
+    print_msg();
+}
+
+fn print_msg() {
+    // 42 is our magic return code for tests
+    return 42;
+}

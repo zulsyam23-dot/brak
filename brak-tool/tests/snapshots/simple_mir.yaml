@@ -1,0 +1,97 @@
+functions:
+- name: main
+  params: []
+  ret_ty: Void
+  blocks:
+  - id: 0
+    name: entry
+    insts:
+    - !Assign
+      dest: 1
+      value: !Int 42
+      span:
+        start:
+          line: 1
+          column: 21
+          offset: 20
+        end:
+          line: 1
+          column: 23
+          offset: 22
+    - !Assign
+      dest: 2
+      value: !Int 10
+      span:
+        start:
+          line: 1
+          column: 26
+          offset: 25
+        end:
+          line: 1
+          column: 28
+          offset: 27
+    - !Assign
+      dest: 3
+      value: !BinOp
+        op: Add
+        lhs: 1
+        rhs: 2
+      span:
+        start:
+          line: 1
+          column: 21
+          offset: 20
+        end:
+          line: 1
+          column: 28
+          offset: 27
+    - !Assign
+      dest: 0
+      value: !Local 3
+      span:
+        start:
+          line: 1
+          column: 13
+          offset: 12
+        end:
+          line: 1
+          column: 28
+          offset: 27
+    terminator: !Return
+      value: 0
+      span:
+        start:
+          line: 1
+          column: 30
+          offset: 29
+        end:
+          line: 1
+          column: 36
+          offset: 35
+    span:
+      start:
+        line: 1
+        column: 11
+        offset: 10
+      end:
+        line: 1
+        column: 41
+        offset: 40
+  locals:
+  - name: x
+    ty: I32
+  - name: tmp_1
+    ty: I32
+  - name: tmp_2
+    ty: I32
+  - name: tmp_3
+    ty: I32
+  span:
+    start:
+      line: 1
+      column: 1
+      offset: 0
+    end:
+      line: 1
+      column: 3
+      offset: 2

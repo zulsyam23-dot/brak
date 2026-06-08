@@ -1,0 +1,12 @@
+[package]
+name = "brak-opt-custom-example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-opt-traits = { path = "../brak-opt-traits" }

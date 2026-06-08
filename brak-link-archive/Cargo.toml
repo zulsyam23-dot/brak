@@ -1,0 +1,7 @@
+[package]
+name = "brak-link-archive"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }

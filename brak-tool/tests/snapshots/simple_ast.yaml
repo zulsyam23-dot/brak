@@ -1,0 +1,108 @@
+items:
+- !FnDef
+  name:
+    name: main
+    span:
+      start:
+        line: 1
+        column: 4
+        offset: 3
+      end:
+        line: 1
+        column: 8
+        offset: 7
+  params: []
+  ret_ty: null
+  body:
+    stmts:
+    - !Let
+      name:
+        name: x
+        span:
+          start:
+            line: 1
+            column: 17
+            offset: 16
+          end:
+            line: 1
+            column: 18
+            offset: 17
+      ty: null
+      value: !BinOp
+        op: Add
+        lhs: !Int
+        - 42
+        - start:
+            line: 1
+            column: 21
+            offset: 20
+          end:
+            line: 1
+            column: 23
+            offset: 22
+        rhs: !Int
+        - 10
+        - start:
+            line: 1
+            column: 26
+            offset: 25
+          end:
+            line: 1
+            column: 28
+            offset: 27
+        span:
+          start:
+            line: 1
+            column: 21
+            offset: 20
+          end:
+            line: 1
+            column: 28
+            offset: 27
+      span:
+        start:
+          line: 1
+          column: 13
+          offset: 12
+        end:
+          line: 1
+          column: 28
+          offset: 27
+    - !Return
+      - !Ident
+        name: x
+        span:
+          start:
+            line: 1
+            column: 37
+            offset: 36
+          end:
+            line: 1
+            column: 38
+            offset: 37
+      - start:
+          line: 1
+          column: 30
+          offset: 29
+        end:
+          line: 1
+          column: 36
+          offset: 35
+    span:
+      start:
+        line: 1
+        column: 11
+        offset: 10
+      end:
+        line: 1
+        column: 41
+        offset: 40
+  span:
+    start:
+      line: 1
+      column: 1
+      offset: 0
+    end:
+      line: 1
+      column: 3
+      offset: 2

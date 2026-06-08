@@ -1,0 +1,3 @@
+fn main() -> I32 {
+    let x: I32 = "unclosed string;
+}

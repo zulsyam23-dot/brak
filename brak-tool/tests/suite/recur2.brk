@@ -1,0 +1,11 @@
+fn fact(n) {
+    if n <= 1 {
+        return 1;
+    }
+    let a = fact(n - 1);
+    return n * a;
+}
+
+fn main() {
+    return fact(3);
+}

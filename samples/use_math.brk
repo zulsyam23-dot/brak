@@ -1,0 +1,8 @@
+extern "C" fn add(a: i32, b: i32) -> i32;
+extern "C" fn mul(a: i32, b: i32) -> i32;
+
+fn main() -> i32 {
+    let x: i32 = add(10, 20);
+    let y: i32 = mul(x, 2);
+    y
+}

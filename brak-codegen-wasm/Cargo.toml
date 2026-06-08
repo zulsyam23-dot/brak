@@ -1,0 +1,9 @@
+[package]
+name = "brak-codegen-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-codegen-traits = { path = "../brak-codegen-traits" }

@@ -1,0 +1,6 @@
+// Brak file that calls LitLang functions
+extern "C" fn greet(name: string) -> i32;
+
+fn main() -> i32 {
+    greet("world")
+}

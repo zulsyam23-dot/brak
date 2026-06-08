@@ -1,0 +1,16 @@
+[package]
+name = "brak-codegen-obj"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-codegen-traits = { path = "../brak-codegen-traits" }
+iced-x86 = { version = "1.21", features = ["code_asm"] }
+
+[dev-dependencies]
+iced-x86 = { version = "1.21", features = ["decoder"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("unstable"))'] }

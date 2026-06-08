@@ -1,0 +1,11 @@
+[package]
+name = "brak-link-traits"
+version = "0.1.0"
+edition = "2021"
+description = "LinkerBackend trait for Brak linker"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("unstable"))'] }

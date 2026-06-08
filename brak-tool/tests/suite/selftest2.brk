@@ -1,0 +1,7 @@
+fn noop(x) {
+    return 0;
+}
+
+fn main() {
+    return noop(42);
+}

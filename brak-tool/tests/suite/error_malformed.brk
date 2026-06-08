@@ -1,0 +1,2 @@
+fn broken() -> I32 {
+    let x: I32 = 

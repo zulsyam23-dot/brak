@@ -1,0 +1,6 @@
+fn main() -> I32 {
+    let x: I32 = 42;
+    let y: Bool = true;
+    let z: I32 = x + y;
+    z
+}

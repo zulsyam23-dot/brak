@@ -1,0 +1,2 @@
+// LitLang sample: compute 42
+fn main() -> I32 = 42;
