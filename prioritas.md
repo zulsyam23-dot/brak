@@ -42,11 +42,9 @@
 - **Dampak**: `break` dan `continue` di dalam loop tidak berfungsi.
 - **Solusi**: Stack loop context di MirLower, mapping `break` → jump ke after-loop block, `continue` → jump ke loop-header block.
 
-### 7. Struct Field Access — Field Offset + Load/Store
-- **Files**: `brak-ir-hir/src/lower.rs`, `brak-ir-mir/src/lower.rs`, `brak-ir-lir/src/lower.rs`
-- **Status**: Struct definitions di AST/HIR → `todo!("struct field access")` di HIR lowering. Field access di MIR belum ada.
-- **Dampak**: Struct tidak bisa didefinisikan atau diakses.
-- **Solusi**: Implement struct layout (field offset kalkulasi), field access lowering (Load/Store dengan offset).
+### 7. Struct Field Access — Field Offset + Load/Store [DONE]
+- **Status**: SELESAI di Phase 9 Infrastructure.
+- **Dampak**: Struct sekarang bisa didefinisikan, diinisialisasi, dan diakses field-nya (read/write).
 
 ### 8. String Constants — `.rodata`/`.data` Section
 - **Files**: `brak-ir-lir/src/lower.rs`, `brak-codegen-obj/src/x86_64.rs`, `brak-codegen-obj/src/elf.rs` dkk

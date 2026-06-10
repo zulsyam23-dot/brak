@@ -115,6 +115,8 @@ mod tests {
         super::LirProgram { 
             functions: vec![main, add],
             extern_functions: vec![],
+            structs: vec![],
+            enums: vec![],
             string_table: vec![],
             files: vec![],
         }

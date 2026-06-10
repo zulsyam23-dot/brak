@@ -217,6 +217,11 @@ pub enum Expr {
         span: Span,
     },
     Block(Block),
+    StructInit {
+        name: Ident,
+        fields: Vec<(Ident, Expr)>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,8 +419,16 @@ impl ContentHash for Expr {
                 h
             }
             Expr::Match { expr, .. } => expr.content_hash(),
-            Expr::Field { object, field, .. } => combine_hash(object.content_hash(), field.name.content_hash()),
+            Expr::Field { object, field, .. } => combine_hash(object.content_hash(), field.content_hash()),
             Expr::Block(b) => b.content_hash(),
+            Expr::StructInit { name, fields, .. } => {
+                let mut h = name.content_hash();
+                for (fname, fexpr) in fields {
+                    h = combine_hash(h, fname.content_hash());
+                    h = combine_hash(h, fexpr.content_hash());
+                }
+                h
+            }
         }
     }
 }
@@ -430,6 +443,7 @@ impl Expr {
             Expr::Match { span, .. } => *span,
             Expr::Field { span, .. } => *span,
             Expr::Block(b) => b.span,
+            Expr::StructInit { span, .. } => *span,
         }
     }
 }
@@ -614,6 +628,14 @@ impl fmt::Display for Expr {
             }
             Expr::Field { object, field, .. } => write!(f, "{object}.{}", field.name),
             Expr::Block(b) => write!(f, "{b}"),
+            Expr::StructInit { name, fields, .. } => {
+                write!(f, "{} {{ ", name.name)?;
+                for (i, (fname, fexpr)) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}: {}", fname.name, fexpr)?;
+                }
+                write!(f, " }}")
+            }
         }
     }
 }

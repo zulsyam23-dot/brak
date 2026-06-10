@@ -8,8 +8,29 @@ pub type BlockId = usize;
 pub struct LirProgram {
     pub functions: Vec<LirFunction>,
     pub extern_functions: Vec<LirExternFunction>,
+    pub structs: Vec<LirStructMetadata>,
+    pub enums: Vec<LirEnumMetadata>,
     pub string_table: Vec<String>,
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirStructMetadata {
+    pub name: String,
+    pub fields: Vec<(String, LirType)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LirEnumMetadata {
+    pub name: String,
+    pub variants: Vec<(String, Option<Vec<LirType>>)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LirType {
+    I32, I64, F32, F64, Bool, String, Void,
+    Named(String),
+    Ptr(Box<LirType>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +92,9 @@ pub enum LirOpcode {
     Br,
     Push, Pop,
     Comment,
+    GetField,
+    StructInit,
+    SetField,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +105,7 @@ pub enum LirOperand {
     Label(String),
     StackSlot(u32),
     StringRef(usize),
+    Field(String),
 }
 
 impl Eq for LirOperand {}
@@ -95,6 +120,7 @@ impl std::hash::Hash for LirOperand {
             LirOperand::Label(s) => s.hash(state),
             LirOperand::StackSlot(s) => s.hash(state),
             LirOperand::StringRef(i) => i.hash(state),
+            LirOperand::Field(s) => s.hash(state),
         }
     }
 }
@@ -194,6 +220,7 @@ impl ContentHash for LirOperand {
             LirOperand::Label(s) => s.content_hash(),
             LirOperand::StackSlot(s) => *s as u64,
             LirOperand::StringRef(i) => *i as u64,
+            LirOperand::Field(s) => s.content_hash(),
         }
     }
 }
@@ -248,7 +275,8 @@ impl std::fmt::Display for LirOperand {
             LirOperand::ImmF64(fl) => write!(f, "{fl}"),
             LirOperand::Label(s) => write!(f, "label:{s}"),
             LirOperand::StackSlot(s) => write!(f, "stack[{s}]"),
-            LirOperand::StringRef(i) => write!(f, "str#{i}"),
+            LirOperand::StringRef(i) => write!(f, "str[{i}]"),
+            LirOperand::Field(s) => write!(f, ".{s}"),
         }
     }
 }

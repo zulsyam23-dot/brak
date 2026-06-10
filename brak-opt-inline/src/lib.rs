@@ -150,7 +150,14 @@ mod tests {
     }
 
     fn make_program(funcs: Vec<LirFunction>) -> LirProgram {
-        LirProgram { functions: funcs, extern_functions: vec![], string_table: vec![], files: vec![] }
+        LirProgram {
+            functions: funcs,
+            extern_functions: vec![],
+            structs: vec![],
+            enums: vec![],
+            string_table: vec![],
+            files: vec![],
+        }
     }
 
     #[test]

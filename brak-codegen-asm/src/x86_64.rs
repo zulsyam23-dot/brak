@@ -236,6 +236,7 @@ fn format_op(op: &LirOperand, alloc: &mut regalloc::SimpleAlloc) -> String {
             }
         }
         LirOperand::StringRef(i) => format!("str_{i}"),
+        LirOperand::Field(s) => s.clone(),
     }
 }
 

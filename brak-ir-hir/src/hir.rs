@@ -11,6 +11,36 @@ pub enum HirItem {
     Function(HirFunction),
     ExternFunction(HirExternFunction),
     GlobalLet(HirGlobalLet),
+    Struct(HirStruct),
+    Enum(HirEnum),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirStruct {
+    pub name: String,
+    pub fields: Vec<HirField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirField {
+    pub name: String,
+    pub ty: HirType,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirEnum {
+    pub name: String,
+    pub variants: Vec<HirVariant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HirVariant {
+    pub name: String,
+    pub fields: Option<Vec<HirType>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +158,17 @@ pub enum HirExpr {
         field: String,
         span: Span,
     },
+    StructInit {
+        name: String,
+        fields: Vec<(String, HirExpr)>,
+        span: Span,
+    },
+    FieldAssign {
+        object: Box<HirExpr>,
+        field: String,
+        value: Box<HirExpr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +210,8 @@ impl HirExpr {
             HirExpr::Block(b) => b.span,
             HirExpr::Match { span, .. } => *span,
             HirExpr::Field { span, .. } => *span,
+            HirExpr::StructInit { span, .. } => *span,
+            HirExpr::FieldAssign { span, .. } => *span,
         }
     }
 }
@@ -189,7 +232,29 @@ impl ContentHash for HirItem {
             HirItem::Function(f) => f.content_hash(),
             HirItem::ExternFunction(e) => e.content_hash(),
             HirItem::GlobalLet(l) => l.content_hash(),
+            HirItem::Struct(s) => s.content_hash(),
+            HirItem::Enum(e) => e.content_hash(),
         }
+    }
+}
+
+impl ContentHash for HirStruct {
+    fn content_hash(&self) -> u64 {
+        let mut h = self.name.content_hash();
+        for field in &self.fields {
+            h = combine_hash(h, field.name.content_hash());
+        }
+        h
+    }
+}
+
+impl ContentHash for HirEnum {
+    fn content_hash(&self) -> u64 {
+        let mut h = self.name.content_hash();
+        for variant in &self.variants {
+            h = combine_hash(h, variant.name.content_hash());
+        }
+        h
     }
 }
 
@@ -298,6 +363,17 @@ impl ContentHash for HirExpr {
             HirExpr::Block(b) => b.content_hash(),
             HirExpr::Match { expr, .. } => expr.content_hash(),
             HirExpr::Field { object, field, .. } => combine_hash(object.content_hash(), field.content_hash()),
+            HirExpr::StructInit { name, fields, .. } => {
+                let mut h = name.content_hash();
+                for (fname, fexpr) in fields {
+                    h = combine_hash(h, fname.content_hash());
+                    h = combine_hash(h, fexpr.content_hash());
+                }
+                h
+            }
+            HirExpr::FieldAssign { object, field, value, .. } => {
+                combine_hash(combine_hash(object.content_hash(), field.content_hash()), value.content_hash())
+            }
         }
     }
 }
@@ -317,6 +393,29 @@ impl std::fmt::Display for HirItem {
             HirItem::Function(func) => write!(f, "{func}"),
             HirItem::ExternFunction(e) => write!(f, "{e}"),
             HirItem::GlobalLet(l) => write!(f, "let {}: {};", l.name, l.ty),
+            HirItem::Struct(s) => {
+                writeln!(f, "struct {} {{", s.name)?;
+                for field in &s.fields {
+                    writeln!(f, "  {}: {},", field.name, field.ty)?;
+                }
+                write!(f, "}}")
+            }
+            HirItem::Enum(e) => {
+                writeln!(f, "enum {} {{", e.name)?;
+                for variant in &e.variants {
+                    write!(f, "  {}", variant.name)?;
+                    if let Some(fields) = &variant.fields {
+                        write!(f, "(")?;
+                        for (i, ty) in fields.iter().enumerate() {
+                            if i > 0 { write!(f, ", ")?; }
+                            write!(f, "{ty}")?;
+                        }
+                        write!(f, ")")?;
+                    }
+                    writeln!(f, ",")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -417,6 +516,15 @@ impl std::fmt::Display for HirExpr {
                 write!(f, "}}")
             }
             HirExpr::Field { object, field, .. } => write!(f, "{object}.{field}"),
+            HirExpr::StructInit { name, fields, .. } => {
+                write!(f, "{} {{ ", name)?;
+                for (i, (fname, fexpr)) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{fname}: {fexpr}")?;
+                }
+                write!(f, " }}")
+            }
+            HirExpr::FieldAssign { object, field, value, .. } => write!(f, "{object}.{field} = {value}"),
         }
     }
 }

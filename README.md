@@ -42,15 +42,45 @@ Berbagai modul untuk membuat kode lebih cepat dan kecil:
 
 ## Cara Menggunakan
 
-Toolkit ini dikelola melalui satu program utama yaitu **brak-tool**.
+### 1. Instalasi
+Pastikan Anda memiliki [Rust](https://rustup.rs/) terinstal. Clone repositori ini dan bangun toolkit:
 
 ```bash
-# Menjalankan compiler
-cargo run -p brak-tool -- build samples/hello.brk --output hello.exe
-
-# Melihat representasi internal (misal: HIR)
-cargo run -p brak-tool -- emit-ir samples/hello.brk --level hir
+git clone https://github.com/user/brak.git
+cd brak
+cargo build --release
 ```
+
+### 2. Kompilasi Program
+Gunakan **brak-tool** untuk mengompilasi file `.brk` menjadi executable native:
+
+```bash
+# Build executable standar
+./target/release/brak build samples/hello.brk --output hello.exe
+
+# Menjalankan dengan cargo (untuk pengembangan)
+cargo run -p brak-tool -- build samples/hello.brk --output hello.exe
+```
+
+### 3. Alur Kerja Pengembangan yang Aman
+Untuk memastikan kode Anda berjalan lancar tanpa kesalahan:
+- **Gunakan Tipe Eksplisit**: Brak sangat ketat terhadap tipe data. Selalu definisikan tipe pada `let` dan `fn`.
+- **Cek Representasi Internal**: Jika terjadi error aneh, lihat IR di level tertentu untuk debug:
+  ```bash
+  brak emit-ir samples/hello.brk --level hir  # Cek tipe data
+  brak emit-ir samples/hello.brk --level mir  # Cek alur kontrol (CFG)
+  brak emit-ir samples/hello.brk --level c    # Lihat hasil transpilaasi C
+  ```
+- **Verifikasi dengan Testing**: Selalu jalankan test suite jika Anda mengubah kompilator:
+  ```bash
+  cargo test
+  ```
+
+## Fitur Unggulan v1.0
+- **Self-Hosting Ready**: Dukungan `struct` dan `enum` lengkap untuk membangun kompilator di dalam Brak.
+- **Zero-Dependency**: Tidak butuh LLVM/GCC terinstal di sistem target.
+- **Smart Caching**: Kompilasi instan untuk proyek besar berkat `brak-bitcode`.
+- **High Performance**: Pipeline optimasi 8+ pass (Inlining, DCE, GVN, dkk).
 
 ---
 *Dibuat secara profesional untuk memastikan modularitas, kejujuran performa, dan kemudahan pengembangan bahasa.*

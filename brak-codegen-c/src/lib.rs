@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use brak_codegen_traits::CodegenBackend;
 use brak_core::Result;
 use brak_ir_lir::lir::{
-    LirOpcode, LirOperand, LirProgram, LirFunction, LirInst, VirtReg,
+    LirOpcode, LirOperand, LirProgram, LirFunction, LirInst, VirtReg, LirType,
 };
 
 pub struct CBackend;
@@ -60,6 +60,11 @@ impl CWriter {
         self.emit_line("#include <stdbool.h>");
         self.emit_line("#include <stdlib.h>");
         self.emit_line("#include <string.h>");
+        self.emit_line("struct _GenericStruct { int64_t _data[1024]; }; // Hack for generic field access");
+        self.emit_blank();
+
+        self.emit_struct_decls(program);
+        self.emit_enum_decls(program);
         self.emit_blank();
 
         self.emit_extern_decls(program);
@@ -70,6 +75,40 @@ impl CWriter {
             self.analyze_function(func);
             self.emit_function(func);
             self.emit_blank();
+        }
+    }
+
+    fn emit_struct_decls(&mut self, program: &LirProgram) {
+        for s in &program.structs {
+            self.emit_line(&format!("typedef struct {} {{", s.name));
+            self.indent += 1;
+            for (fname, fty) in &s.fields {
+                self.emit_line(&format!("{} {};", self.c_type(fty), fname));
+            }
+            self.indent -= 1;
+            self.emit_line(&format!("}} {};", s.name));
+            self.emit_blank();
+        }
+    }
+
+    fn emit_enum_decls(&mut self, program: &LirProgram) {
+        for e in &program.enums {
+            // Simplified enum: just a typedef to int for now
+            self.emit_line(&format!("typedef int {};", e.name));
+        }
+    }
+
+    fn c_type(&self, ty: &LirType) -> String {
+        match ty {
+            LirType::I32 => "int32_t".to_string(),
+            LirType::I64 => "int64_t".to_string(),
+            LirType::F32 => "float".to_string(),
+            LirType::F64 => "double".to_string(),
+            LirType::Bool => "bool".to_string(),
+            LirType::String => "const char*".to_string(),
+            LirType::Void => "void".to_string(),
+            LirType::Named(s) => s.clone(),
+            LirType::Ptr(inner) => format!("{}*", self.c_type(inner)),
         }
     }
 
@@ -307,6 +346,9 @@ impl CWriter {
             LirOpcode::Load => self.emit_load(inst),
             LirOpcode::Store => self.emit_store(inst),
             LirOpcode::Alloca => self.emit_alloca(inst),
+            LirOpcode::GetField => self.emit_get_field(inst),
+            LirOpcode::StructInit => self.emit_struct_init(inst),
+            LirOpcode::SetField => self.emit_set_field(inst),
             LirOpcode::Call => self.emit_call(inst),
             LirOpcode::Ret => self.emit_ret(inst),
             LirOpcode::Jmp => self.emit_jmp(inst),
@@ -314,6 +356,48 @@ impl CWriter {
             LirOpcode::Push | LirOpcode::Pop => {}
             LirOpcode::Comment => {}
         }
+    }
+
+    fn emit_get_field(&mut self, inst: &LirInst) {
+        let dest = self.dest_name(inst);
+        let obj = self.op_str(0, inst);
+        let field = match inst.operands.get(1) {
+            Some(LirOperand::Field(s)) => s,
+            _ => "unknown",
+        };
+        // Use a cast to a generic pointer and then to the struct if possible,
+        // or just use a placeholder struct name.
+        self.emit_line(&format!("{} = ((struct _GenericStruct*)(uintptr_t){})->{};", dest, obj, field));
+    }
+
+    fn emit_struct_init(&mut self, inst: &LirInst) {
+        let dest = self.dest_name(inst);
+        let struct_name = match inst.operands.get(0) {
+            Some(LirOperand::Label(s)) => s,
+            _ => "unknown",
+        };
+        self.emit_line(&format!("{} = (int64_t)(uintptr_t)calloc(1, sizeof(struct {}));", dest, struct_name));
+        let mut i = 1;
+        while i < inst.operands.len() {
+            let field = match inst.operands.get(i) {
+                Some(LirOperand::Field(s)) => s,
+                _ => break,
+            };
+            let val = self.operand_str(&inst.operands[i+1]);
+            self.emit_line(&format!("((struct {}*)(uintptr_t){})->{} = {};", struct_name, dest, field, val));
+            i += 2;
+        }
+    }
+
+    fn emit_set_field(&mut self, inst: &LirInst) {
+        let obj = self.op_str(0, inst);
+        let field = match inst.operands.get(1) {
+            Some(LirOperand::Field(s)) => s,
+            _ => "unknown",
+        };
+        let val = self.op_str(2, inst);
+        // Generic cast as we don't know the struct name here easily
+        self.emit_line(&format!("((struct _GenericStruct*)(uintptr_t){})->{} = {};", obj, field, val));
     }
 
     fn emit_mov(&mut self, inst: &LirInst) {
@@ -476,6 +560,7 @@ impl CWriter {
             LirOperand::Label(name) => name.clone(),
             LirOperand::StackSlot(slot) => format!("*(int64_t*)(_stack + {})", slot * 8),
             LirOperand::StringRef(idx) => format!("(int64_t)(uintptr_t)_s{}p", idx),
+            LirOperand::Field(s) => s.clone(),
         }
     }
 

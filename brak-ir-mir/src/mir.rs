@@ -8,6 +8,36 @@ pub type BlockId = usize;
 pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     pub extern_functions: Vec<MirExternFunction>,
+    pub structs: Vec<MirStruct>,
+    pub enums: Vec<MirEnum>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirStruct {
+    pub name: String,
+    pub fields: Vec<MirField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirField {
+    pub name: String,
+    pub ty: MirType,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirEnum {
+    pub name: String,
+    pub variants: Vec<MirVariant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirVariant {
+    pub name: String,
+    pub fields: Option<Vec<MirType>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +112,20 @@ pub enum MirValue {
     UnOp {
         op: MirUnOp,
         expr: LocalId,
+    },
+    GetField {
+        object: LocalId,
+        name: String, // Struct name
+        field: String,
+    },
+    StructInit {
+        name: String,
+        fields: Vec<(String, LocalId)>,
+    },
+    SetField {
+        object: LocalId,
+        field: String,
+        value: LocalId,
     },
 }
 
@@ -185,6 +229,20 @@ impl ContentHash for MirValue {
             MirValue::UnOp { op, expr } => {
                 combine_hash(*op as u64, *expr as u64)
             }
+            MirValue::GetField { object, name: _, field } => {
+                combine_hash(*object as u64, field.content_hash())
+            }
+            MirValue::StructInit { name, fields } => {
+                let mut h = name.content_hash();
+                for (fname, fid) in fields {
+                    h = combine_hash(h, fname.content_hash());
+                    h = combine_hash(h, *fid as u64);
+                }
+                h
+            }
+            MirValue::SetField { object, field, value } => {
+                combine_hash(combine_hash(*object as u64, field.content_hash()), *value as u64)
+            }
         }
     }
 }
@@ -270,6 +328,16 @@ impl std::fmt::Display for MirValue {
             MirValue::String(s) => write!(f, "\"{s}\""),
             MirValue::BinOp { op, lhs, rhs } => write!(f, "(%{lhs} {op} %{rhs})"),
             MirValue::UnOp { op, expr } => write!(f, "{op}%{expr}"),
+            MirValue::GetField { object, name: _, field } => write!(f, "%{object}.{field}"),
+            MirValue::StructInit { name, fields } => {
+                write!(f, "{} {{ ", name)?;
+                for (i, (fname, fid)) in fields.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{fname}: %{fid}")?;
+                }
+                write!(f, " }}")
+            }
+            MirValue::SetField { object, field, value } => write!(f, "%{object}.{field} = %{value}"),
         }
     }
 }

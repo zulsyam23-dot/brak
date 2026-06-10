@@ -54,7 +54,27 @@ impl HirLower {
                         continue;
                     }
                 }
-                _ => {} // other items don't have duplicate checking yet
+                ast::Item::Struct(s) => {
+                    if !seen_names.insert(s.name.name.clone()) {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "duplicate definition of struct `{}`", s.name.name
+                            )).with_span(s.name.span)
+                        );
+                        continue;
+                    }
+                }
+                ast::Item::Enum(e) => {
+                    if !seen_names.insert(e.name.name.clone()) {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "duplicate definition of enum `{}`", e.name.name
+                            )).with_span(e.name.span)
+                        );
+                        continue;
+                    }
+                }
+                _ => {}
             }
             match self.lower_item(item) {
                 Ok(i) => items.push(i),
@@ -117,10 +137,34 @@ impl HirLower {
                     span: l.span,
                 }))
             }
+            ast::Item::Struct(s) => {
+                let fields = s.fields.into_iter().map(|f| HirField {
+                    name: f.name.name,
+                    ty: lower_type(f.ty),
+                    span: f.span,
+                }).collect();
+                Ok(HirItem::Struct(HirStruct {
+                    name: s.name.name,
+                    fields,
+                    span: s.span,
+                }))
+            }
+            ast::Item::Enum(e) => {
+                let variants = e.variants.into_iter().map(|v| HirVariant {
+                    name: v.name.name,
+                    fields: v.fields.map(|fs| fs.into_iter().map(lower_type).collect()),
+                    span: v.span,
+                }).collect();
+                Ok(HirItem::Enum(HirEnum {
+                    name: e.name.name,
+                    variants,
+                    span: e.span,
+                }))
+            }
             _ => {
                 let mut diags = Diagnostics::new();
                 diags.push(
-                    Diagnostic::error("unsupported item type for lowering (struct/enum/trait/impl/use/mod/const/static)".to_string())
+                    Diagnostic::error("unsupported item type for lowering (trait/impl/use/mod/const/static)".to_string())
                 );
                 Err(diags)
             }
@@ -194,13 +238,12 @@ impl HirLower {
             ast::Expr::Assign(lhs, rhs, span) => {
                 match *lhs {
                     ast::Expr::Ident(id) => HirExpr::Assign(id.name, Box::new(self.lower_expr(*rhs)), span),
-                    ast::Expr::Field { object, field, .. } => {
-                        let dotted = match *object {
-                            ast::Expr::Ident(id) => format!("{}.{}", id.name, field.name),
-                            _ => unreachable!("parser should reject non-ident field object"),
-                        };
-                        HirExpr::Assign(dotted, Box::new(self.lower_expr(*rhs)), span)
-                    }
+                    ast::Expr::Field { object, field, .. } => HirExpr::FieldAssign {
+                        object: Box::new(self.lower_expr(*object)),
+                        field: field.name,
+                        value: Box::new(self.lower_expr(*rhs)),
+                        span,
+                    },
                     _ => unreachable!("parser should reject non-ident LHS"),
                 }
             }
@@ -242,6 +285,11 @@ impl HirLower {
             ast::Expr::Field { object, field, span } => HirExpr::Field {
                 object: Box::new(self.lower_expr(*object)),
                 field: field.name,
+                span,
+            },
+            ast::Expr::StructInit { name, fields, span } => HirExpr::StructInit {
+                name: name.name,
+                fields: fields.into_iter().map(|(n, e)| (n.name, self.lower_expr(e))).collect(),
                 span,
             },
         }

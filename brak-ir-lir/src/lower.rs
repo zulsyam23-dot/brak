@@ -17,6 +17,19 @@ impl Default for LirLower {
     }
 }
 
+fn lower_mir_type_to_lir(ty: &MirType) -> LirType {
+    match ty {
+        MirType::I32 => LirType::I32,
+        MirType::I64 => LirType::I64,
+        MirType::F32 => LirType::F32,
+        MirType::F64 => LirType::F64,
+        MirType::Bool => LirType::Bool,
+        MirType::String => LirType::String,
+        MirType::Void => LirType::Void,
+        MirType::Named(s) => LirType::Named(s.clone()),
+    }
+}
+
 impl LirLower {
     pub fn new() -> Self {
         Self {
@@ -41,6 +54,16 @@ impl LirLower {
     }
 
     pub fn lower(&mut self, program: MirProgram) -> LirProgram {
+        let structs = program.structs.iter().map(|s| LirStructMetadata {
+            name: s.name.clone(),
+            fields: s.fields.iter().map(|f| (f.name.clone(), lower_mir_type_to_lir(&f.ty))).collect(),
+        }).collect();
+
+        let enums = program.enums.iter().map(|e| LirEnumMetadata {
+            name: e.name.clone(),
+            variants: e.variants.iter().map(|v| (v.name.clone(), v.fields.as_ref().map(|fs| fs.iter().map(lower_mir_type_to_lir).collect()))).collect(),
+        }).collect();
+
         let extern_functions: Vec<LirExternFunction> = program
             .extern_functions
             .into_iter()
@@ -67,7 +90,7 @@ impl LirLower {
             .collect();
 
         let string_table = std::mem::take(&mut self.string_table);
-        LirProgram { functions, extern_functions, string_table, files: vec![] }
+        LirProgram { functions, extern_functions, structs, enums, string_table, files: vec![] }
     }
 
     fn lower_function(&mut self, func: MirFunction) -> LirFunction {
@@ -260,12 +283,43 @@ impl LirLower {
             MirValue::UnOp { op, expr } => {
                 let lir_op = match op {
                     MirUnOp::Neg => LirOpcode::Neg,
-                    MirUnOp::Not | MirUnOp::BitNot => LirOpcode::Not,
+                    MirUnOp::Not => LirOpcode::Not,
+                    MirUnOp::BitNot => LirOpcode::Not, // TODO: BitNot
                 };
                 insts.push(
                     LirInst::new(lir_op)
                         .with_dest(*dest)
                         .with_op(LirOperand::Reg(*expr))
+                        .with_debug(span),
+                );
+            }
+            MirValue::GetField { object, name: _, field } => {
+                insts.push(
+                    LirInst::new(LirOpcode::GetField)
+                        .with_dest(*dest)
+                        .with_op(LirOperand::Reg(*object))
+                        .with_op(LirOperand::Field(field.clone()))
+                        .with_debug(span),
+                );
+            }
+            MirValue::StructInit { name, fields } => {
+                let mut lir = LirInst::new(LirOpcode::StructInit)
+                    .with_dest(*dest)
+                    .with_op(LirOperand::Label(name.clone()))
+                    .with_debug(span);
+                for (fname, fval) in fields {
+                    lir = lir.with_op(LirOperand::Field(fname.clone()));
+                    lir = lir.with_op(LirOperand::Reg(*fval));
+                }
+                insts.push(lir);
+            }
+            MirValue::SetField { object, field, value } => {
+                insts.push(
+                    LirInst::new(LirOpcode::SetField)
+                        .with_dest(*dest)
+                        .with_op(LirOperand::Reg(*object))
+                        .with_op(LirOperand::Field(field.clone()))
+                        .with_op(LirOperand::Reg(*value))
                         .with_debug(span),
                 );
             }

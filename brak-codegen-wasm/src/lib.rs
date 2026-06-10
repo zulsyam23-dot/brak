@@ -227,6 +227,7 @@ impl<'a> WasmWriter<'a> {
             LirOpcode::Jmp => self.emit_jmp(inst),
             LirOpcode::Br => self.emit_br(inst),
             LirOpcode::Push | LirOpcode::Pop | LirOpcode::Comment => {}
+            _ => {}
         }
     }
 
@@ -442,12 +443,13 @@ impl<'a> WasmWriter<'a> {
 
     fn operand_str(&self, op: &LirOperand) -> String {
         match op {
-            LirOperand::Reg(r) => format!("r{}", r),
-            LirOperand::ImmI64(i) => i.to_string(),
-            LirOperand::ImmF64(f) => f.to_string(),
-            LirOperand::Label(n) => n.clone(),
-            LirOperand::StackSlot(s) => format!("slot{}", s),
+            LirOperand::Reg(r) => format!("${}", self.reg_name(*r)),
+            LirOperand::ImmI64(i) => format!("{}", i),
+            LirOperand::ImmF64(f) => format!("{}", f),
+            LirOperand::Label(s) => s.clone(),
+            LirOperand::StackSlot(s) => format!("stack{}", s),
             LirOperand::StringRef(i) => format!("str{}", i),
+            LirOperand::Field(s) => s.clone(),
         }
     }
 

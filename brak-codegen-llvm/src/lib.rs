@@ -308,6 +308,7 @@ impl<'a> LlvmWriter<'a> {
                 }
             }
             LirOpcode::Push | LirOpcode::Pop | LirOpcode::Comment => {}
+            _ => {} // Ignore new opcodes for now
         }
     }
 

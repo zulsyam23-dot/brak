@@ -203,9 +203,11 @@ pub fn write_elf_executable(program: &LirProgram, entry: &str) -> Result<Vec<u8>
         let func = functions.remove(pos);
         functions.insert(0, func);
     }
-    let reordered = LirProgram { 
+    let reordered = LirProgram {
         functions,
         extern_functions: program.extern_functions.clone(),
+        structs: program.structs.clone(),
+        enums: program.enums.clone(),
         string_table: program.string_table.clone(),
         files: program.files.clone(),
     };

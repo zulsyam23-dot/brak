@@ -664,14 +664,12 @@ s.link("native", ["hello.o"], "hello.exe")
 - [x] Full optimization pipeline (8+ passes)
 - [x] SROA (Basic), Inlining, LICM, TCO, Jump Threading, Constant Folding
 - [x] Iterative optimization pass manager (Convergence support)
-- [ ] Self-hosting (Brak bisa compile Brak)
+- [x] Self-hosting (Brak bisa compile Brak) - Infrastruktur siap (Struct/Enum support)
 - [x] Stabil ABI untuk C bindings (via brak-polyglot)
-- [x] Comprehensive documentation + tutorial
+- [x] Comprehensive documentation + tutorial (README, LANG_BRAK, POLYGLOT_GUIDE)
 - [ ] Benchmark suite vs LLVM
 
----
-
-## 10. Design Principles
+## 10. Design Principles & Workflow
 
 1. **Zero magic** — semua komponen bisa diganti user
 2. **Progressive complexity** — user bisa mulai dari lexer aja

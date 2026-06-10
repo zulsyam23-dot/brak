@@ -64,6 +64,8 @@ impl MirLower {
     pub fn lower(&mut self, program: HirProgram) -> Result<MirProgram, Diagnostics> {
         let mut functions = vec![];
         let mut extern_functions = vec![];
+        let mut structs = vec![];
+        let mut enums = vec![];
         for item in program.items {
             match item {
                 HirItem::Function(f) => {
@@ -80,13 +82,35 @@ impl MirLower {
                         span: e.span,
                     });
                 }
+                HirItem::Struct(s) => {
+                    structs.push(MirStruct {
+                        name: s.name,
+                        fields: s.fields.into_iter().map(|f| MirField {
+                            name: f.name,
+                            ty: lower_hir_type(&f.ty),
+                            span: f.span,
+                        }).collect(),
+                        span: s.span,
+                    });
+                }
+                HirItem::Enum(e) => {
+                    enums.push(MirEnum {
+                        name: e.name,
+                        variants: e.variants.into_iter().map(|v| MirVariant {
+                            name: v.name,
+                            fields: v.fields.map(|fs| fs.iter().map(lower_hir_type).collect()),
+                            span: v.span,
+                        }).collect(),
+                        span: e.span,
+                    });
+                }
                 HirItem::GlobalLet(_) => {}
             }
         }
         if self.diagnostics.has_errors() {
             Err(std::mem::take(&mut self.diagnostics))
         } else {
-            Ok(MirProgram { functions, extern_functions })
+            Ok(MirProgram { functions, extern_functions, structs, enums })
         }
     }
 
@@ -667,40 +691,62 @@ impl MirLower {
                 }
             }
             HirExpr::Field { object, field, span } => {
-                match object.as_ref() {
-                    HirExpr::Ident(name, _) => {
-                        let dotted = format!("{name}.{field}");
-                        if let Some(&id) = self.local_map.get(&dotted) {
-                            Ok(id)
-                        } else {
-                            let base_id = self.get_or_create_local(name, MirType::I32);
-                            let id = self.fresh_local();
-                            self.locals.push(MirLocal {
-                                name: format!("tmp_{id}"),
-                                ty: MirType::I32,
-                            });
-                            insts.push(MirInst::Assign {
-                                dest: id,
-                                value: MirValue::Local(base_id),
-                                span: *span,
-                            });
-                            Ok(id)
-                        }
-                    }
-                    _ => {
-                        let id = self.fresh_local();
-                        self.locals.push(MirLocal {
-                            name: format!("tmp_{id}"),
-                            ty: MirType::I32,
-                        });
-                        insts.push(MirInst::Assign {
-                            dest: id,
-                            value: MirValue::Int(0),
-                            span: *span,
-                        });
-                        Ok(id)
-                    }
+                let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
+                let id = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{id}"),
+                    ty: MirType::I32, // Simplified for now
+                });
+                insts.push(MirInst::Assign {
+                    dest: id,
+                    value: MirValue::GetField {
+                        object: obj_id,
+                        name: "unknown".to_string(), // TODO: Get struct name
+                        field: field.clone(),
+                    },
+                    span: *span,
+                });
+                Ok(id)
+            }
+            HirExpr::StructInit { name, fields, span } => {
+                let mut mir_fields = vec![];
+                for (fname, fexpr) in fields {
+                    let fid = self.emit_expr(fexpr, insts, current_name, blocks)?;
+                    mir_fields.push((fname.clone(), fid));
                 }
+                let id = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{id}"),
+                    ty: MirType::Named(name.clone()),
+                });
+                insts.push(MirInst::Assign {
+                    dest: id,
+                    value: MirValue::StructInit {
+                        name: name.clone(),
+                        fields: mir_fields,
+                    },
+                    span: *span,
+                });
+                Ok(id)
+            }
+            HirExpr::FieldAssign { object, field, value, span } => {
+                let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
+                let val_id = self.emit_expr(value, insts, current_name, blocks)?;
+                let id = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{id}"),
+                    ty: MirType::I32, // Simplified
+                });
+                insts.push(MirInst::Assign {
+                    dest: id,
+                    value: MirValue::SetField {
+                        object: obj_id,
+                        field: field.clone(),
+                        value: val_id,
+                    },
+                    span: *span,
+                });
+                Ok(id)
             }
         }
     }

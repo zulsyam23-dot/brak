@@ -8,6 +8,8 @@ pub struct TypeChecker {
     diags: Diagnostics,
     locals: HashMap<String, HirType>,
     functions: HashMap<String, (Vec<HirType>, HirType)>,
+    structs: HashMap<String, HirStruct>,
+    enums: HashMap<String, HirEnum>,
     current_ret_ty: Option<HirType>,
 }
 
@@ -23,6 +25,8 @@ impl TypeChecker {
             diags: Diagnostics::new(),
             locals: HashMap::new(),
             functions: HashMap::new(),
+            structs: HashMap::new(),
+            enums: HashMap::new(),
             current_ret_ty: None,
         }
     }
@@ -37,6 +41,12 @@ impl TypeChecker {
                 HirItem::ExternFunction(e) => {
                     let param_tys: Vec<HirType> = e.params.iter().map(|p| p.ty.clone()).collect();
                     self.functions.insert(e.name.clone(), (param_tys, e.ret_ty.clone()));
+                }
+                HirItem::Struct(s) => {
+                    self.structs.insert(s.name.clone(), s.clone());
+                }
+                HirItem::Enum(e) => {
+                    self.enums.insert(e.name.clone(), e.clone());
                 }
                 _ => {}
             }
@@ -294,27 +304,105 @@ impl TypeChecker {
                 arm0_ty
             }
             HirExpr::Field { object, field, span } => {
-                match object.as_ref() {
-                    HirExpr::Ident(name, _) => {
-                        let dotted = format!("{name}.{field}");
-                        if let Some(ty) = self.locals.get(&dotted) {
-                            ty.clone()
+                let obj_ty = self.infer_expr(object);
+                
+                // Try struct field access
+                let struct_name = match &obj_ty {
+                    HirType::Named(name) => Some(name),
+                    HirType::Ptr(inner) | HirType::Ref(inner) => {
+                        if let HirType::Named(name) = inner.as_ref() {
+                            Some(name)
                         } else {
-                            self.diags.push(
-                                Diagnostic::error(format!("undefined field `{field}` for `{name}`"))
-                                    .with_span(*span)
-                            );
-                            HirType::Void
+                            None
                         }
                     }
-                    _ => {
-                        self.diags.push(
-                            Diagnostic::error(format!("field access on non-identifier not yet supported"))
-                                .with_span(*span)
-                        );
-                        HirType::I32
+                    _ => None,
+                };
+
+                if let Some(name) = struct_name {
+                    if let Some(s) = self.structs.get(name) {
+                        if let Some(f) = s.fields.iter().find(|f| f.name == *field) {
+                            return f.ty.clone();
+                        }
                     }
                 }
+
+                // Fallback to dotted name (for compatibility with current lowering)
+                if let HirExpr::Ident(obj_name, _) = object.as_ref() {
+                    let dotted = format!("{obj_name}.{field}");
+                    if let Some(ty) = self.locals.get(&dotted) {
+                        return ty.clone();
+                    }
+                }
+
+                self.diags.push(
+                    Diagnostic::error(format!("undefined field `{field}` for type `{obj_ty}`"))
+                        .with_span(*span)
+                );
+                HirType::Void
+            }
+            HirExpr::StructInit { name, fields, span } => {
+                if let Some(s) = self.structs.get(name).cloned() {
+                    for (fname, fexpr) in fields {
+                        let fty = self.infer_expr(fexpr);
+                        if let Some(field_def) = s.fields.iter().find(|f| f.name == *fname) {
+                            if fty != field_def.ty {
+                                self.diags.push(
+                                    Diagnostic::error(format!(
+                                        "field `{fname}` type mismatch: expected {}, got {fty}", field_def.ty
+                                    )).with_span(fexpr.span())
+                                );
+                            }
+                        } else {
+                            self.diags.push(
+                                Diagnostic::error(format!("struct `{name}` has no field `{fname}`"))
+                                    .with_span(*span)
+                            );
+                        }
+                    }
+                    HirType::Named(name.clone())
+                } else {
+                    self.diags.push(
+                        Diagnostic::error(format!("undefined struct `{name}`"))
+                            .with_span(*span)
+                    );
+                    HirType::Void
+                }
+            }
+            HirExpr::FieldAssign { object, field, value, span } => {
+                let obj_ty = self.infer_expr(object);
+                let val_ty = self.infer_expr(value);
+                
+                let struct_name = match &obj_ty {
+                    HirType::Named(name) => Some(name),
+                    HirType::Ptr(inner) | HirType::Ref(inner) => {
+                        if let HirType::Named(name) = inner.as_ref() {
+                            Some(name)
+                        } else { None }
+                    }
+                    _ => None,
+                };
+
+                if let Some(name) = struct_name {
+                    if let Some(s) = self.structs.get(name) {
+                        if let Some(f) = s.fields.iter().find(|f| f.name == *field) {
+                            if val_ty != f.ty {
+                                self.diags.push(
+                                    Diagnostic::error(format!(
+                                        "field `{field}` type mismatch: expected {}, got {val_ty}", f.ty
+                                    )).with_span(*span)
+                                );
+                            }
+                            return f.ty.clone();
+                        }
+                    }
+                }
+
+                self.diags.push(
+                    Diagnostic::error(format!("undefined field `{field}` for type `{obj_ty}`"))
+                        .with_span(*span)
+                );
+                HirType::Void
             }
         }
     }

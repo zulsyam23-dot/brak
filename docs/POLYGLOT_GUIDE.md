@@ -65,5 +65,12 @@ print(f"Hasil dari Brak: {hasil}")
 | `Bool`    | `int8_t`     | `bool`      |
 | `String`  | `char*`      | `str`       |
 
+## Tips Alur Kerja Aman (Safe Workflow)
+
+1. **Verifikasi ABI**: Gunakan `extern "C"` di Brak untuk fungsi yang akan diekspor guna memastikan kompatibilitas ABI yang stabil.
+2. **Memory Management**: Brak menggunakan model memori yang sederhana. Saat mengirim `String` ke C, pastikan Anda memahami bahwa itu adalah pointer ke `char`. Jangan melakukan `free()` di C pada string yang dimiliki oleh Brak kecuali ditentukan lain.
+3. **Sinkronisasi Header**: Selalu jalankan ulang perintah `polyglot` setiap kali Anda mengubah tanda tangan fungsi (function signature) di Brak agar file `.h` tetap sinkron.
+4. **Python Maturin**: Untuk integrasi Python, gunakan `maturin develop` di dalam folder output untuk instalasi cepat saat pengembangan.
+
 ---
 *Sistem Polyglot memastikan tidak ada penurunan performa saat memanggil fungsi antar bahasa karena semua disatukan di level Low-level IR (LIR).*

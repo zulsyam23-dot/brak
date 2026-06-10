@@ -768,6 +768,7 @@ impl Parser {
                 Ok(match_expr)
             }
             TokenKind::Ident => {
+                let name_tok = tok.clone();
                 if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LParen) {
                     let call_start = tok.span.start;
                     *pos += 1;
@@ -789,6 +790,25 @@ impl Parser {
                         callee: Box::new(Expr::Ident(Ident { name: tok.lexeme, span: tok.span })),
                         args,
                         span: Span::new(call_start, end),
+                    })
+                } else if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LBrace) {
+                    *pos += 1; // consume {
+                    let mut fields = vec![];
+                    while tokens.get(*pos).map(|t| t.kind) != Some(TokenKind::RBrace) {
+                        let f_name = self.expect_ident(tokens, pos);
+                        self.expect_noerr(TokenKind::Colon, tokens, pos);
+                        let f_expr = self.parse_expr(tokens, pos)?;
+                        fields.push((f_name, f_expr));
+                        if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Comma) {
+                            *pos += 1;
+                        }
+                    }
+                    self.expect_noerr(TokenKind::RBrace, tokens, pos);
+                    let end = self.span(tokens, *pos - 1).end;
+                    Ok(Expr::StructInit {
+                        name: Ident { name: name_tok.lexeme, span: name_tok.span },
+                        fields,
+                        span: Span::new(name_tok.span.start, end),
                     })
                 } else {
                     Ok(Expr::Ident(Ident { name: tok.lexeme, span: tok.span }))
