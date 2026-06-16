@@ -17,4 +17,5 @@ members = [
     "brak-link-native",
     "brak-tool", "brak-link-archive", "brak-link-wasm", "brak-bitcode", "brak-opt-traits", "brak-opt-dce", "brak-opt-cp", "brak-opt-gvn", "brak-opt-inline", "brak-opt-custom-example", "brak-test", "brak-polyglot", "brak-lang-lit", "brak-opt-utils", "brak-opt-licm",
     "brak-opt-jt", "brak-opt-tco", "brak-opt-fold",
+    "brak-easy",
 ]

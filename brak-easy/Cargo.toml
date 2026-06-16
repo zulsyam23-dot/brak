@@ -1,0 +1,32 @@
+[package]
+name = "brak-easy"
+version = "0.1.0"
+edition = "2021"
+description = "High-level user-friendly API for building languages with Brak"
+
+[dependencies]
+brak-core = { path = "../brak-core" }
+brak-frontend = { path = "../brak-frontend" }
+brak-ir-ast = { path = "../brak-ir-ast" }
+brak-ir-hir = { path = "../brak-ir-hir" }
+brak-ir-mir = { path = "../brak-ir-mir" }
+brak-ir-lir = { path = "../brak-ir-lir" }
+brak-opt-traits = { path = "../brak-opt-traits" }
+brak-opt-dce = { path = "../brak-opt-dce" }
+brak-opt-cp = { path = "../brak-opt-cp" }
+brak-opt-fold = { path = "../brak-opt-fold" }
+brak-opt-gvn = { path = "../brak-opt-gvn" }
+brak-opt-inline = { path = "../brak-opt-inline" }
+brak-codegen-traits = { path = "../brak-codegen-traits" }
+brak-codegen-obj = { path = "../brak-codegen-obj" }
+brak-link-traits = { path = "../brak-link-traits" }
+brak-link-native = { path = "../brak-link-native" }
+serde = { version = "1.0", features = ["derive"] }
+
+[[example]]
+name = "ijat_compiler"
+path = "../samples/ijat_compiler.rs"
+
+[[example]]
+name = "easy_compiler"
+path = "../samples/easy_compiler.rs"

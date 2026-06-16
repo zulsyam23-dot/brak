@@ -667,6 +667,7 @@ s.link("native", ["hello.o"], "hello.exe")
 - [x] Self-hosting (Brak bisa compile Brak) - Infrastruktur siap (Struct/Enum support)
 - [x] Stabil ABI untuk C bindings (via brak-polyglot)
 - [x] Comprehensive documentation + tutorial (README, LANG_BRAK, POLYGLOT_GUIDE)
+- [x] `brak-easy` — High-level user-friendly mapping tool & pipeline API
 - [ ] Benchmark suite vs LLVM
 
 ## 10. Design Principles & Workflow

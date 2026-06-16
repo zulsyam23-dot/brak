@@ -128,6 +128,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "brak-easy"
+version = "0.1.0"
+dependencies = [
+ "brak-codegen-obj",
+ "brak-codegen-traits",
+ "brak-core",
+ "brak-frontend",
+ "brak-ir-ast",
+ "brak-ir-hir",
+ "brak-ir-lir",
+ "brak-ir-mir",
+ "brak-link-native",
+ "brak-link-traits",
+ "brak-opt-cp",
+ "brak-opt-dce",
+ "brak-opt-fold",
+ "brak-opt-gvn",
+ "brak-opt-inline",
+ "brak-opt-traits",
+ "serde",
+]
+
+[[package]]
 name = "brak-frontend"
 version = "0.1.0"
 dependencies = [
