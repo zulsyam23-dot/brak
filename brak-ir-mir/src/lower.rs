@@ -16,6 +16,8 @@ pub struct MirLower {
     locals: Vec<MirLocal>,
     local_map: HashMap<String, LocalId>,
     loop_stack: Vec<LoopContext>,
+    /// Fase 7: enum name -> ordered variant names (tag = index).
+    enum_tags: HashMap<String, Vec<String>>,
 }
 
 impl Default for MirLower {
@@ -32,6 +34,7 @@ impl MirLower {
             locals: vec![],
             local_map: HashMap::new(),
             loop_stack: vec![],
+            enum_tags: HashMap::new(),
         }
     }
 
@@ -61,11 +64,39 @@ impl MirLower {
         self.loop_stack = vec![];
     }
 
+    /// Fase 7: 0-based tag of a variant within its enum.
+    fn enum_variant_tag(&self, enum_name: &str, variant: &str) -> Option<usize> {
+        self.enum_tags.get(enum_name)?.iter().position(|v| v == variant)
+    }
+
+    /// The constant a pattern compares against, if any. `None` means
+    /// catch-all (wildcard/binding) or non-comparable literal.
+    fn pattern_discriminant(&self, pat: &HirPattern) -> Option<i64> {
+        match pat {
+            HirPattern::Literal(HirLiteral::Int(i)) => Some(*i),
+            HirPattern::Literal(HirLiteral::Bool(b)) => Some(*b as i64),
+            HirPattern::Variant { enum_name, variant } => {
+                self.enum_variant_tag(enum_name, variant).map(|t| t as i64)
+            }
+            _ => None,
+        }
+    }
+
     pub fn lower(&mut self, program: HirProgram) -> Result<MirProgram, Diagnostics> {
         let mut functions = vec![];
         let mut extern_functions = vec![];
         let mut structs = vec![];
         let mut enums = vec![];
+        // Fase 7 pre-pass: register enum variant tags before lowering any
+        // function body (constructors may appear in earlier items).
+        for item in &program.items {
+            if let HirItem::Enum(e) = item {
+                self.enum_tags.insert(
+                    e.name.clone(),
+                    e.variants.iter().map(|v| v.name.clone()).collect(),
+                );
+            }
+        }
         for item in program.items {
             match item {
                 HirItem::Function(f) => {
@@ -93,17 +124,7 @@ impl MirLower {
                         span: s.span,
                     });
                 }
-                HirItem::Enum(e) => {
-                    enums.push(MirEnum {
-                        name: e.name,
-                        variants: e.variants.into_iter().map(|v| MirVariant {
-                            name: v.name,
-                            fields: v.fields.map(|fs| fs.iter().map(lower_hir_type).collect()),
-                            span: v.span,
-                        }).collect(),
-                        span: e.span,
-                    });
-                }
+                HirItem::Enum(_) => {} // collected in the pre-pass below
                 HirItem::GlobalLet(_) => {}
             }
         }
@@ -782,6 +803,23 @@ impl MirLower {
                 });
                 Ok(id)
             }
+            HirExpr::EnumInit { enum_name, variant, span } => {
+                // Fase 7: fieldless enum values are represented by their
+                // variant's tag index (0-based, declaration order).
+                let tag = self.enum_variant_tag(&enum_name, &variant)
+                    .expect("typeck validated enum variant before MIR lowering");
+                let id = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{id}"),
+                    ty: MirType::Named(enum_name.clone()),
+                });
+                insts.push(MirInst::Assign {
+                    dest: id,
+                    value: MirValue::Int(tag as i64),
+                    span: *span,
+                });
+                Ok(id)
+            }
             HirExpr::FieldAssign { object, field, value, span } => {
                 let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
                 let val_id = self.emit_expr(value, insts, current_name, blocks)?;
@@ -838,10 +876,15 @@ impl MirLower {
 
         let scrut_id = self.emit_expr(scrutinee, insts, current_name, blocks)?;
 
-        // Effective arms: everything up to & including first non-literal pattern.
+        // Fase 7: discriminants cover Int literals, Bool literals, AND enum
+        // variant tags. First catch-all (wildcard/binding/other literal) ends
+        // the comparable chain.
+        let discs: Vec<Option<i64>> = arms.iter()
+            .map(|(pat, _)| self.pattern_discriminant(pat))
+            .collect();
         let mut eff_len = arms.len();
-        for (i, (pat, _)) in arms.iter().enumerate() {
-            if !matches!(pat, HirPattern::Literal(_)) {
+        for (i, d) in discs.iter().enumerate() {
+            if d.is_none() {
                 eff_len = i + 1;
                 break;
             }
@@ -866,7 +909,7 @@ impl MirLower {
         for i in 0..eff_len {
             entry[i] = cursor;
             let is_last = i == eff_len - 1;
-            let needs_check = !is_last && matches!(arms[i].0, HirPattern::Literal(_));
+            let needs_check = !is_last && discs[i].is_some();
             if needs_check {
                 cursor += 1;
             }
@@ -887,15 +930,11 @@ impl MirLower {
         for i in 0..eff_len {
             let is_last = i == eff_len - 1;
 
-            // Check block: compare scrutinee against a literal pattern.
-            if !is_last {
-                if let HirPattern::Literal(lit) = &arms[i].0 {
-                    let value = match lit {
-                        HirLiteral::Int(v) => MirValue::Int(*v),
-                        HirLiteral::Float(v) => MirValue::Float(*v),
-                        HirLiteral::Bool(v) => MirValue::Bool(*v),
-                        HirLiteral::Str(v) => MirValue::String(v.clone()),
-                    };
+            // Check block: compare scrutinee against the arm's discriminant
+            // (int/bool literal or enum variant tag — Fase 7).
+            if let Some(disc) = discs[i] {
+                if !is_last {
+                    {
                     // BinOp operands are locals: materialize the literal first.
                     let pat_local = self.fresh_local();
                     self.locals.push(MirLocal {
@@ -913,7 +952,7 @@ impl MirLower {
                         insts: vec![
                             MirInst::Assign {
                                 dest: pat_local,
-                                value,
+                                value: MirValue::Int(disc),
                                 span,
                             },
                             MirInst::Assign {
@@ -934,6 +973,7 @@ impl MirLower {
                         },
                         span: dummy(),
                     });
+                    }
                 }
             }
 

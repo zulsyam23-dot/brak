@@ -382,7 +382,7 @@ impl TypeChecker {
                 }
             }
             HirExpr::Match { expr, arms, span } => {
-                let _expr_ty = self.infer_expr(expr);
+                let scrutinee_ty = self.infer_expr(expr);
                 if arms.is_empty() {
                     self.diags.push(
                         Diagnostic::error("match must have at least one arm".to_string())
@@ -390,8 +390,66 @@ impl TypeChecker {
                     );
                     return HirType::Void;
                 }
+
+                // Fase 7: exhaustiveness for enum matches. If the scrutinee is
+                // a known enum and no wildcard/binding arm exists, every
+                // variant must be covered.
+                if let HirType::Named(enum_name) = &scrutinee_ty {
+                    let has_catchall = arms.iter().any(|(p, _)| matches!(
+                        p,
+                        HirPattern::Wildcard | HirPattern::Binding(_)
+                    ));
+                    if !has_catchall {
+                        if let Some(e) = self.enums.get(enum_name) {
+                            for v in &e.variants {
+                                let covered = arms.iter().any(|(p, _)| matches!(
+                                    p,
+                                    HirPattern::Variant { variant, .. } if variant == &v.name
+                                ));
+                                if !covered {
+                                    self.diags.push(
+                                        Diagnostic::error(format!(
+                                            "match on `{enum_name}` is not exhaustive: missing variant `{}`",
+                                            v.name
+                                        )).with_span(*span)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let arm0_ty = self.infer_expr(&arms[0].1);
                 for (i, (pat, body)) in arms.iter().enumerate() {
+                    // Variant patterns must reference an existing enum+variant
+                    // whose type equals the scrutinee's (Fase 7).
+                    if let HirPattern::Variant { enum_name, variant } = pat {
+                        match self.enums.get(enum_name) {
+                            None => self.diags.push(
+                                Diagnostic::error(format!(
+                                    "pattern `{enum_name}.{variant}`: undefined enum `{enum_name}`"
+                                )).with_span(*span)
+                            ),
+                            Some(e) => {
+                                if e.variants.iter().all(|v| v.name != *variant) {
+                                    self.diags.push(
+                                        Diagnostic::error(format!(
+                                            "enum `{enum_name}` has no variant `{variant}`"
+                                        )).with_span(*span)
+                                    );
+                                }
+                            }
+                        }
+                        let pat_ty = HirType::Named(enum_name.clone());
+                        if pat_ty != scrutinee_ty {
+                            self.diags.push(
+                                Diagnostic::error(format!(
+                                    "match arm {} pattern type mismatch: scrutinee is {}, pattern is {}",
+                                    i, scrutinee_ty, pat_ty
+                                )).with_span(*span)
+                            );
+                        }
+                    }
                     // Literal patterns must type-check against the scrutinee;
                     // Wildcard/Binding accept anything.
                     if let HirPattern::Literal(lit) = pat {
@@ -472,6 +530,40 @@ impl TypeChecker {
                             .with_span(*span)
                     );
                     HirType::Void
+                }
+            }
+            HirExpr::EnumInit { enum_name, variant, span } => {
+                // Fase 7: validate enum/variant exist and the variant carries
+                // no payload. The value is represented as the variant's tag.
+                match self.enums.get(enum_name) {
+                    None => {
+                        self.diags.push(
+                            Diagnostic::error(format!(
+                                "undefined enum `{enum_name}` in constructor `{enum_name}.{variant}`"
+                            )).with_span(*span)
+                        );
+                        HirType::Void
+                    }
+                    Some(e) => match e.variants.iter().find(|v| v.name == *variant) {
+                        None => {
+                            self.diags.push(
+                                Diagnostic::error(format!(
+                                    "enum `{enum_name}` has no variant `{variant}`"
+                                )).with_span(*span)
+                            );
+                            HirType::Void
+                        }
+                        Some(v) => {
+                            if v.fields.is_some() {
+                                self.diags.push(
+                                    Diagnostic::error(format!(
+                                        "enum variant `{enum_name}.{variant}` has a payload — payload enums are not yet supported"
+                                    )).with_span(*span)
+                                );
+                            }
+                            HirType::Named(enum_name.clone())
+                        }
+                    },
                 }
             }
             HirExpr::FieldAssign { object, field, value, span } => {

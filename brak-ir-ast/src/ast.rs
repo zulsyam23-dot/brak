@@ -222,6 +222,13 @@ pub enum Expr {
         fields: Vec<(Ident, Expr)>,
         span: Span,
     },
+    /// Enum construction: `EnumName.Variant()` (Fase 7, fieldless variants).
+    EnumCons {
+        enum_name: Ident,
+        variant: Ident,
+        args: Vec<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +243,12 @@ pub enum Pattern {
     Ident(Ident),
     Literal(Expr),
     Wildcard(Span),
+    /// `EnumName.Variant` — matches that exact variant (fieldless enums).
+    Variant {
+        enum_name: Ident,
+        variant: Ident,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,6 +442,13 @@ impl ContentHash for Expr {
                 }
                 h
             }
+            Expr::EnumCons { enum_name, variant, args, .. } => {
+                let mut h = combine_hash(enum_name.content_hash(), variant.content_hash());
+                for a in args {
+                    h = combine_hash(h, a.content_hash());
+                }
+                h
+            }
         }
     }
 }
@@ -444,6 +464,7 @@ impl Expr {
             Expr::Field { span, .. } => *span,
             Expr::Block(b) => b.span,
             Expr::StructInit { span, .. } => *span,
+            Expr::EnumCons { span, .. } => *span,
         }
     }
 }
@@ -636,6 +657,14 @@ impl fmt::Display for Expr {
                 }
                 write!(f, " }}")
             }
+            Expr::EnumCons { enum_name, variant, args, .. } => {
+                write!(f, "{}.{}(", enum_name.name, variant.name)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{a}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -646,6 +675,7 @@ impl fmt::Display for Pattern {
             Pattern::Ident(id) => write!(f, "{}", id.name),
             Pattern::Literal(e) => write!(f, "{e}"),
             Pattern::Wildcard(_) => write!(f, "_"),
+            Pattern::Variant { enum_name, variant, .. } => write!(f, "{}.{}", enum_name.name, variant.name),
         }
     }
 }

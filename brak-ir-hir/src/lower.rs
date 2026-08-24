@@ -299,6 +299,16 @@ impl HirLower {
                 fields: fields.into_iter().map(|(n, e)| (n.name, self.lower_expr(e))).collect(),
                 span,
             },
+            ast::Expr::EnumCons { enum_name, variant, args, span } => {
+                // Fase 7: payload validation happens in typeck (it knows the
+                // enum's variant arity); args are dropped here for now.
+                let _ = args;
+                HirExpr::EnumInit {
+                    enum_name: enum_name.name,
+                    variant: variant.name,
+                    span,
+                }
+            }
         }
     }
 }
@@ -313,19 +323,23 @@ fn infer_init_type(v: Option<&HirExpr>) -> HirType {
         Some(HirExpr::Int(..)) => HirType::I32,
         Some(HirExpr::Bool(..)) => HirType::Bool,
         Some(HirExpr::String(..)) => HirType::String,
+        Some(HirExpr::EnumInit { enum_name, .. }) => HirType::Named(enum_name.clone()),
         // A BinOp whose operand chain bottoms out in a Float literal is float.
         Some(HirExpr::BinOp { lhs, .. }) => infer_init_type(Some(lhs)),
         _ => HirType::I32,
     }
 }
-
-fn lower_pattern(p: ast::Pattern) -> HirPattern {    match p {
+fn lower_pattern(p: ast::Pattern) -> HirPattern {
+    match p {
         ast::Pattern::Wildcard(_) => HirPattern::Wildcard,
         ast::Pattern::Ident(id) => {
             // `_` parses as Ident too — normalize it to Wildcard
             if id.name == "_" { HirPattern::Wildcard } else { HirPattern::Binding(id.name) }
         }
         ast::Pattern::Literal(e) => HirPattern::Literal(lower_literal_pattern(e)),
+        ast::Pattern::Variant { enum_name, variant, .. } => {
+            HirPattern::Variant { enum_name: enum_name.name, variant: variant.name }
+        }
     }
 }
 

@@ -52,15 +52,27 @@ fn main() -> i32 {
 Digunakan untuk tipe data yang bisa memiliki beberapa varian.
 
 ```brak
-enum Result {
-    Ok(i32),
-    Error,
+enum State {
+    Idle,
+    Running,
+    Done,
+}
+
+fn label(s: State) -> i32 {
+    match s {
+        State.Idle => 0,
+        State.Running => 1,
+        State.Done => 2,
+    }
 }
 ```
 
-> ⚠️ Catatan status: enum dengan payload (`Ok(i32)`) sudah bisa dideklarasikan,
-> tetapi konstruksi dan destrukturisasi nilainya belum didukung penuh oleh
-> compiler. `match` mendukung pattern literal (`1 => ...`) dan wildcard (`_ => ...`).
+- Konstruksi: `EnumName.Variant` atau `EnumName.Variant()`.
+- Match **wajib exhaustif**: jika tidak ada arm wildcard (`_`) atau binding,
+  semua varian harus tercakup — compiler akan menolak program yang kurang.
+- Nilai enum direpresentasikan sebagai tag integer sesuai urutan deklarasi.
+- ⚠️ Enum dengan payload (`Ok(i32)`) bisa dideklarasikan tetapi konstruksi dan
+  destructuring payload belum didukung (butuh lapisan memory/aggregate).
 
 ### 4. Kontrol Alur
 

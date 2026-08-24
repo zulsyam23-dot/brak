@@ -163,6 +163,13 @@ pub enum HirExpr {
         fields: Vec<(String, HirExpr)>,
         span: Span,
     },
+    /// Enum construction: `EnumName.Variant(...)` (Fase 7).
+    /// Fieldless variants ignore args; payload variants are not yet supported.
+    EnumInit {
+        enum_name: String,
+        variant: String,
+        span: Span,
+    },
     FieldAssign {
         object: Box<HirExpr>,
         field: String,
@@ -175,12 +182,14 @@ pub enum HirExpr {
 /// structure — match always executed the first arm).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HirPattern {
-    /// `_` — matches anything
+    /// `_` - matches anything
     Wildcard,
-    /// `name` — matches anything and binds the scrutinee to `name`
+    /// `name` - matches anything and binds the scrutinee to `name`
     Binding(String),
-    /// literal pattern — compared against the scrutinee with Eq
+    /// literal pattern - compared against the scrutinee with Eq
     Literal(HirLiteral),
+    /// `EnumName.Variant` - matches that enum variant's tag (Fase 7)
+    Variant { enum_name: String, variant: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -212,6 +221,9 @@ impl ContentHash for HirPattern {
             HirPattern::Wildcard => 1,
             HirPattern::Binding(s) => s.content_hash(),
             HirPattern::Literal(l) => l.content_hash(),
+            HirPattern::Variant { enum_name, variant } => {
+                combine_hash(enum_name.content_hash(), variant.content_hash())
+            }
         }
     }
 }
@@ -256,6 +268,7 @@ impl HirExpr {
             HirExpr::Match { span, .. } => *span,
             HirExpr::Field { span, .. } => *span,
             HirExpr::StructInit { span, .. } => *span,
+            HirExpr::EnumInit { span, .. } => *span,
             HirExpr::FieldAssign { span, .. } => *span,
         }
     }
@@ -278,6 +291,8 @@ impl std::fmt::Display for HirPattern {
             HirPattern::Wildcard => write!(f, "_"),
             HirPattern::Binding(s) => write!(f, "{s}"),
             HirPattern::Literal(l) => write!(f, "{l}"),
+            HirPattern::Variant { enum_name, variant } => write!(f, "{enum_name}.{variant}"),
+            HirPattern::Variant { enum_name, variant } => write!(f, "{enum_name}.{variant}"),
         }
     }
 }
@@ -436,6 +451,9 @@ impl ContentHash for HirExpr {
                 h
             }
             HirExpr::Field { object, field, .. } => combine_hash(object.content_hash(), field.content_hash()),
+            HirExpr::EnumInit { enum_name, variant, .. } => {
+                combine_hash(enum_name.content_hash(), variant.content_hash())
+            }
             HirExpr::StructInit { name, fields, .. } => {
                 let mut h = name.content_hash();
                 for (fname, fexpr) in fields {
@@ -589,6 +607,7 @@ impl std::fmt::Display for HirExpr {
                 write!(f, "}}")
             }
             HirExpr::Field { object, field, .. } => write!(f, "{object}.{field}"),
+            HirExpr::EnumInit { enum_name, variant, .. } => write!(f, "{enum_name}.{variant}()"),
             HirExpr::StructInit { name, fields, .. } => {
                 write!(f, "{} {{ ", name)?;
                 for (i, (fname, fexpr)) in fields.iter().enumerate() {

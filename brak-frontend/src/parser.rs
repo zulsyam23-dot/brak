@@ -693,6 +693,43 @@ impl Parser {
                 Some(TokenKind::Dot) => {
                     *pos += 1;
                     let field = self.expect_ident(tokens, pos);
+                    // Fase 7: `Enum.Variant(...)` — enum construction. An
+                    // `Ident.Field(` sequence is ambiguous with future method
+                    // calls; HIR-lowering validates against known enums.
+                    if matches!(&expr, Expr::Ident(_)) {
+                        let enum_name = match &expr {
+                            Expr::Ident(id) => id.clone(),
+                            _ => unreachable!(),
+                        };
+                        // With parentheses: `Enum.Variant(args)` — always a
+                        // constructor. Without: `Enum.Variant` counts as one
+                        // only for PascalCase variants (Brak naming
+                        // convention); lowercase stays a struct field access.
+                        let starts_upper = field.name.chars().next()
+                            .map(|c| c.is_ascii_uppercase()).unwrap_or(false);
+                        let has_parens =
+                            tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LParen);
+                        if has_parens || starts_upper {
+                            let mut args = vec![];
+                            if has_parens {
+                                *pos += 1;
+                                if tokens.get(*pos).map(|t| t.kind) != Some(TokenKind::RParen) {
+                                    loop {
+                                        args.push(self.parse_expr(tokens, pos)?);
+                                        if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Comma) {
+                                            *pos += 1;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.expect_noerr(TokenKind::RParen, tokens, pos);
+                            }
+                            let span = Span::new(enum_name.span.start, field.span.end);
+                            expr = Expr::EnumCons { enum_name, variant: field, args, span };
+                            continue;
+                        }
+                    }
                     let span = Span::new(expr.span().start, field.span.end);
                     expr = Expr::Field {
                         object: Box::new(expr),
@@ -914,6 +951,15 @@ impl Parser {
             }
             TokenKind::Ident => {
                 let id = self.expect_ident(tokens, pos);
+                // Fase 7: `EnumName.Variant` variant pattern.
+                if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Dot)
+                    && tokens.get(*pos + 1).map(|t| t.kind) == Some(TokenKind::Ident)
+                {
+                    *pos += 1; // consume '.'
+                    let variant = self.expect_ident(tokens, pos);
+                    let span = Span::new(id.span.start, variant.span.end);
+                    return Ok(Pattern::Variant { enum_name: id, variant, span });
+                }
                 Ok(Pattern::Ident(id))
             }
             _ => {
