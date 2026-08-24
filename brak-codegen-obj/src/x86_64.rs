@@ -152,7 +152,6 @@ pub fn emit_function(
     line_entries: &mut Vec<LineEntry>,
 ) -> Result<(Vec<u8>, Vec<Reloc>), CodegenError> {
     let mut a = CodeAssembler::new(64)?;
-    let mut relocs: Vec<Reloc> = Vec::new();
     let mut pending_relocs = Vec::new();
     let mut lir_sizes: Vec<usize> = Vec::new();
     let mut lir_line_map: Vec<(usize, usize, usize, bool)> = Vec::new();
@@ -321,7 +320,7 @@ fn emit_inst(
                 a.mov(rax, qword_ptr(rbp - offset))?;
                 a.mov(vreg_ptr(d), rax)?;
             }
-            (Some(d), [LirOperand::StringRef(_)]) => {
+            (Some(_d), [LirOperand::StringRef(_)]) => {
                 // BUG-K09: was a silent `mov rax, 0` — a null-pointer time bomb.
                 // Real .rodata emission needs section support in elf/coff/macho;
                 // failing loudly beats handing out null pointers.

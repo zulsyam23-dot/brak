@@ -119,14 +119,14 @@ pub fn link_elf(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<L
     // ── Section Headers ───────────────────────────────
     buf.extend(std::iter::repeat_n(0, 64)); // NULL section
 
-    write_name(&mut buf, &shstrtab_data, b".shstrtab");
+    write_name(&mut buf, &shstrtab_data, b".shstrtab")?;
     write_u32(&mut buf, SHT_STRTAB);
     write_u64(&mut buf, 0); write_u64(&mut buf, 0);
     write_u64(&mut buf, shstrtab_off); write_u64(&mut buf, shstrtab_size);
     write_u32(&mut buf, 0); write_u32(&mut buf, 0);
     write_u64(&mut buf, 0); write_u64(&mut buf, 0);
 
-    write_name(&mut buf, &shstrtab_data, b".text");
+    write_name(&mut buf, &shstrtab_data, b".text")?;
     write_u32(&mut buf, SHT_PROGBITS);
     write_u64(&mut buf, 6);
     write_u64(&mut buf, 0);
@@ -173,4 +173,5 @@ fn write_name(buf: &mut Vec<u8>, table: &[u8], name: &[u8]) -> brak_core::Result
     write_u32(buf, offset);
     Ok(())
 }
+
 
