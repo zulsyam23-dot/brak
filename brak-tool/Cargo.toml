@@ -23,6 +23,7 @@ brak-codegen-wasm = { path = "../brak-codegen-wasm" }
 brak-codegen-llvm = { path = "../brak-codegen-llvm" }
 brak-link-traits = { path = "../brak-link-traits" }
 brak-link-native = { path = "../brak-link-native" }
+brak-link-archive = { path = "../brak-link-archive" }
 brak-link-wasm = { path = "../brak-link-wasm" }
 brak-bitcode = { path = "../brak-bitcode" }
 brak-opt-traits = { path = "../brak-opt-traits" }

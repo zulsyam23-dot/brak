@@ -5,6 +5,9 @@ use brak_ir_lir::lir::{
     LirOpcode, LirOperand, LirProgram, LirFunction, LirInst, VirtReg,
 };
 
+/// BUG-K11 note: this backend emits **WAT text** (WebAssembly text format),
+/// not a binary `.wasm` module. Consumers must assemble it with wat2wasm or
+/// similar before loading.
 pub struct WasmBackend;
 
 impl CodegenBackend for WasmBackend {
@@ -89,7 +92,10 @@ impl<'a> WasmWriter<'a> {
                 .replace('\n', "\\n")
                 .replace('\r', "\\r")
                 .replace('\t', "\\t");
-            (start, format!("{}\0", escaped))
+            // Escaped WAT sequences decode to exactly one byte each, so raw
+            // byte length matches. The terminator must be an ESCAPED NUL — a
+            // literal \0 control character makes the WAT invalid.
+            (start, format!("{escaped}\\00"))
         }).collect();
         for (offset, content) in segs {
             self.emit_line(&format!("(data (i32.const {}) \"{}\")", offset + 12, content));
@@ -211,6 +217,11 @@ impl<'a> WasmWriter<'a> {
             LirOpcode::Sub => self.emit_binop("i64.sub", inst),
             LirOpcode::Mul => self.emit_binop("i64.mul", inst),
             LirOpcode::Div => self.emit_binop("i64.div_s", inst),
+            // BUG-M17: float ops via f64 reinterpret (values are i64 slots).
+            LirOpcode::FAdd => self.emit_fbinop("f64.add", inst),
+            LirOpcode::FSub => self.emit_fbinop("f64.sub", inst),
+            LirOpcode::FMul => self.emit_fbinop("f64.mul", inst),
+            LirOpcode::FDiv => self.emit_fbinop("f64.div", inst),
             LirOpcode::Mod => self.emit_binop("i64.rem_s", inst),
             LirOpcode::Neg => self.emit_unop("i64.sub", inst),
             LirOpcode::Not => self.emit_unop("i64.eqz", inst),
@@ -261,9 +272,11 @@ impl<'a> WasmWriter<'a> {
                 }
             }
             LirOperand::ImmF64(f) => {
+                // BUG-K11: reinterpret must come AFTER pushing the f64 value —
+                // the reversed order produced an invalid type stack.
                 let val_str = if f.is_nan() { "nan:0x1".to_string() } else { format!("{:.20}", f) };
-                self.emit_line("i64.reinterpret_f64");
                 self.emit_line(&format!("f64.const {}", val_str));
+                self.emit_line("i64.reinterpret_f64");
                 if let Some(d) = dest {
                     self.emit_line(&format!("local.set ${}", self.reg_name(d)));
                 }
@@ -291,6 +304,24 @@ impl<'a> WasmWriter<'a> {
         self.push_operand(1, inst);
         self.emit_line(wasm_op);
         if let Some(d) = inst.dest {
+            self.emit_line(&format!("local.set ${}", self.reg_name(d)));
+        }
+    }
+
+    /// BUG-M17: f64 binop on i64-typed locals — reinterpret both operands to
+    /// f64, operate, cast the result back to i64 bits.
+    fn emit_fbinop(&mut self, wasm_op: &str, inst: &LirInst) {
+        for idx in [0usize, 1] {
+            if let Some(LirOperand::Reg(r)) = inst.operands.get(idx) {
+                self.push_reg(*r);
+                self.emit_line("f64.reinterpret_i64");
+            } else {
+                self.push_operand(idx, inst);
+            }
+        }
+        self.emit_line(wasm_op);
+        if let Some(d) = inst.dest {
+            self.emit_line("i64.reinterpret_f64");
             self.emit_line(&format!("local.set ${}", self.reg_name(d)));
         }
     }
@@ -376,16 +407,17 @@ impl<'a> WasmWriter<'a> {
         if let Some(op) = inst.operands.first() {
             match op {
                 LirOperand::Reg(r) => self.push_reg(*r),
+                // BUG-K11: immediate returns silently returned 0 before.
+                LirOperand::ImmI64(i) => self.emit_line(&format!("i64.const {i}")),
                 _ => {
                     let s = self.operand_str(op);
-                    // parse or fallback
                     self.emit_line(&format!("i64.const 0 ;; return {}", s));
                 }
             }
         } else {
             self.emit_line("i64.const 0");
         }
-        self.emit_line("br $__done");
+        self.emit_line("return");
     }
 
     fn emit_jmp(&mut self, inst: &LirInst) {

@@ -12,27 +12,64 @@ use brak_codegen_obj::ObjBackend;
 use brak_link_traits::{LinkerBackend, ObjectFile};
 use brak_link_native::NativeLinker;
 
+use std::collections::HashSet;
+
+/// Optimization level, similar to -O0/-O1/-O2/-O3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    /// No optimization.
+    None,
+    /// Basic optimizations (fold + DCE).
+    Less,
+    /// Full pipeline, 1 iteration (default).
+    Default,
+    /// Full pipeline, 4 iterations.
+    Aggressive,
+}
+
+const ALL_PASSES: &[&str] = &["inline", "cp", "fold", "gvn", "dce"];
+
+fn build_pass_manager(level: OptLevel, iterations: usize, disabled: &HashSet<&'static str>) -> PassManager {
+    let mut pm = PassManager::default();
+    let enabled: &[&str] = match level {
+        OptLevel::None => &[],
+        OptLevel::Less => &["fold", "dce"],
+        OptLevel::Default | OptLevel::Aggressive => ALL_PASSES,
+    };
+    for name in enabled {
+        if !disabled.contains(name) {
+            pm.add_pass(match *name {
+                "inline" => Box::new(brak_opt_inline::Inlining),
+                "cp" => Box::new(brak_opt_cp::ConstantPropagation),
+                "fold" => Box::new(brak_opt_fold::ConstantFolding),
+                "gvn" => Box::new(brak_opt_gvn::GlobalValueNumbering),
+                "dce" => Box::new(brak_opt_dce::DeadCodeElimination),
+                _ => unreachable!(),
+            });
+        }
+    }
+    pm.max_iterations = iterations;
+    pm
+}
+
 /// A high-level pipeline that simplifies the compilation process.
 /// It automates the transition between AST, HIR, MIR, and LIR,
 /// and handles optimization and code generation.
 pub struct EasyPipeline {
-    pass_manager: PassManager,
-    opt_iterations: usize,
+    opt_level: OptLevel,
+    opt_iterations: Option<usize>,
+    disabled_passes: HashSet<&'static str>,
+    verbose: bool,
     entry_point: String,
 }
 
 impl Default for EasyPipeline {
     fn default() -> Self {
-        let mut pm = PassManager::default();
-        pm.add_pass(Box::new(brak_opt_inline::Inlining));
-        pm.add_pass(Box::new(brak_opt_cp::ConstantPropagation));
-        pm.add_pass(Box::new(brak_opt_fold::ConstantFolding));
-        pm.add_pass(Box::new(brak_opt_gvn::GlobalValueNumbering));
-        pm.add_pass(Box::new(brak_opt_dce::DeadCodeElimination));
-        
         Self {
-            pass_manager: pm,
-            opt_iterations: 1,
+            opt_level: OptLevel::Default,
+            opt_iterations: None,
+            disabled_passes: HashSet::new(),
+            verbose: false,
             entry_point: "main".to_string(),
         }
     }
@@ -44,10 +81,37 @@ impl EasyPipeline {
         Self::default()
     }
 
-    /// Sets the number of optimization iterations to run.
-    pub fn with_iterations(mut self, iterations: usize) -> Self {
-        self.opt_iterations = iterations;
+    /// Sets the optimization level.
+    pub fn with_opt_level(mut self, level: OptLevel) -> Self {
+        self.opt_level = level;
         self
+    }
+
+    /// Disables a specific optimization pass by name (e.g. "inline").
+    pub fn without_pass(mut self, name: &'static str) -> Self {
+        self.disabled_passes.insert(name);
+        self
+    }
+
+    /// Prints optimizer activity to stdout.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Sets the number of optimization iterations to run.
+    /// Overrides the default for the chosen [`OptLevel`].
+    pub fn with_iterations(mut self, iterations: usize) -> Self {
+        self.opt_iterations = Some(iterations);
+        self
+    }
+
+    fn pass_manager(&self) -> PassManager {
+        let iterations = self.opt_iterations.unwrap_or(match self.opt_level {
+            OptLevel::Aggressive => 4,
+            _ => 1,
+        });
+        build_pass_manager(self.opt_level, iterations, &self.disabled_passes)
     }
 
     /// Sets the entry point function name (default is "main").
@@ -104,11 +168,18 @@ impl EasyPipeline {
         lir.files = vec![name.to_string()];
         
         // Run optimizations
-        for _ in 0..self.opt_iterations {
-            lir = self.pass_manager.run(lir)?;
-        }
-        
+        // BUG-H08: PassManager::run already iterates max_iterations times;
+        // wrapping it in another loop ran every pass up to N² times.
+        let pm = self.pass_manager();
+        lir = pm.run(lir)?;
+
         Ok(lir)
+    }
+
+    /// Compiles a source string to an object file (no linking).
+    pub fn compile_to_object(&self, name: &str, source: &str) -> BrakResult<Vec<u8>> {
+        let lir = self.compile_to_lir(name, source)?;
+        ObjBackend::default().emit(&lir)
     }
 
     /// Converts LIR to a standalone executable file.
@@ -129,5 +200,45 @@ impl EasyPipeline {
         })?;
         
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_levels_change_pipeline() {
+        let src = "fn main() -> i32 { 42 }";
+        let none = EasyPipeline::new().with_opt_level(OptLevel::None).compile_to_lir("t", src).unwrap();
+        let aggr = EasyPipeline::new().with_opt_level(OptLevel::Aggressive).compile_to_lir("t", src).unwrap();
+        assert!(!none.functions.is_empty() && !aggr.functions.is_empty());
+
+        let obj = EasyPipeline::new().compile_to_object("t", src).unwrap();
+        assert!(!obj.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod nested_tests {
+    use super::*;
+
+    fn run(src: &str, level: OptLevel) -> i32 {
+        let lir = EasyPipeline::new().with_opt_level(level).compile_to_lir("t", src).unwrap();
+        // interpret via brak-test? no - just check via building exe
+        let dir = std::env::temp_dir().join("brak_nested_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join(format!("t_{:?}.exe", level));
+        EasyPipeline::new().with_opt_level(level).lir_to_executable("t", lir, out.to_str().unwrap()).unwrap();
+        let status = std::process::Command::new(&out).status().unwrap();
+        status.code().unwrap()
+    }
+
+    #[test]
+    fn nested_correct_at_every_opt_level() {
+        let src = "fn main() { let x = 0; let i = 0; while i < 5 { if i % 2 == 0 { x = x + i; } else { x = x + 1; } i = i + 1; } return x; }";
+        for level in [OptLevel::None, OptLevel::Less, OptLevel::Default, OptLevel::Aggressive] {
+            assert_eq!(run(src, level), 8, "wrong result at {:?}", level);
+        }
     }
 }

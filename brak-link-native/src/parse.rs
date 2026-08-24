@@ -357,12 +357,18 @@ pub fn parse_coff(data: &[u8]) -> Result<ParsedElf> {
 
         let value = read_u32(data, sym_off + 8) as u64;
         let sec_num = read_i16(data, sym_off + 12) as u16;
+        let storage_class = data[sym_off + 16];
         let aux_symbols = data[sym_off + 17] as usize;
+
+        // BUG-H07: every symbol was marked GLOBAL — local/static and section
+        // symbols could shadow real globals across objects, silently mis-linking.
+        // Only IMAGE_SYM_CLASS_EXTERNAL (2) is global; everything else is local.
+        let binding = if storage_class == 2 { STB_GLOBAL } else { 0 };
 
         symbols.push(ParsedSymbol {
             name,
             st_value: value,
-            st_info: STB_GLOBAL << 4, // Shift to match ELF-like st_info
+            st_info: binding << 4, // ELF-like st_info layout
             st_shndx: sec_num,
         });
 
@@ -456,13 +462,20 @@ pub fn resolve_sym_addr(
     }
 }
 
-pub fn find_entry_offset(parsed: &[ParsedElf], global_syms: &HashMap<String, (usize, usize)>, text_bases: &[u64], entry: &str) -> u64 {
+/// BUG-H06: a missing entry symbol used to silently return offset 0, making
+/// the start stub jump to whatever sat at text start. Now it is an error.
+pub fn find_entry_offset(
+    parsed: &[ParsedElf],
+    global_syms: &HashMap<String, (usize, usize)>,
+    text_bases: &[u64],
+    entry: &str,
+) -> Result<u64> {
     match global_syms.get(entry) {
         Some(&(oi, si)) => {
             let sym = &parsed[oi].symbols[si];
-            text_bases[oi] + sym.st_value
+            Ok(text_bases[oi] + sym.st_value)
         }
-        None => 0,
+        None => Err(format!("undefined entry symbol: '{entry}'").into()),
     }
 }
 
@@ -474,22 +487,40 @@ pub fn apply_reloc(
     base_addr: u64,
     target_offset: u64,
 ) -> Result<()> {
+    apply_reloc_with_addend(text, patch_offset, r_type, sym_addr, 0, base_addr, target_offset)
+}
+
+/// BUG-H04: relocation addends are now honored (`S + A` / `S + A - P`). The old
+/// code hardcoded `A = 0`, which only worked because Brak's own objects emit
+/// addend-0 relocations — any conforming ELF object (e.g. `R_X86_64_PC32`
+/// with addend `-4`) linked incorrectly.
+pub fn apply_reloc_with_addend(
+    text: &mut [u8],
+    patch_offset: usize,
+    r_type: u32,
+    sym_addr: u64,
+    addend: i64,
+    base_addr: u64,
+    target_offset: u64,
+) -> Result<()> {
     let patch_addr = base_addr + target_offset;
     match r_type {
         R_X86_64_64 => {
-            let val = sym_addr.wrapping_add(0); // A = 0
+            let val = (sym_addr as i64).wrapping_add(addend) as u64;
             if patch_offset + 8 <= text.len() {
                 text[patch_offset..patch_offset + 8].copy_from_slice(&val.to_le_bytes());
             }
         }
         R_X86_64_PC32 | R_X86_64_PLT32 => {
-            let val = (sym_addr as i64).wrapping_sub((patch_addr + 4) as i64); // PC-relative to end of 4-byte displacement
+            let val = (sym_addr as i64)
+                .wrapping_add(addend)
+                .wrapping_sub((patch_addr + 4) as i64);
             if patch_offset + 4 <= text.len() {
                 text[patch_offset..patch_offset + 4].copy_from_slice(&(val as i32).to_le_bytes());
             }
         }
         R_X86_64_32S => {
-            let val = sym_addr as i32;
+            let val = ((sym_addr as i64).wrapping_add(addend)) as i32;
             if patch_offset + 4 <= text.len() {
                 text[patch_offset..patch_offset + 4].copy_from_slice(&val.to_le_bytes());
             }
@@ -568,7 +599,15 @@ pub fn apply_all_relocs(
             let sym_addr = resolve_sym_addr(parsed, global_syms, sym, text_bases, base_addr, target_offset_base, oi)?;
             let patch_offset = (obj_text_base + rela.r_offset) as usize;
             let target_offset = target_offset_base + obj_text_base + rela.r_offset;
-            apply_reloc(&mut text, patch_offset, rela.r_type, sym_addr, base_addr, target_offset)?;
+            apply_reloc_with_addend(
+                &mut text,
+                patch_offset,
+                rela.r_type,
+                sym_addr,
+                rela.r_addend,
+                base_addr,
+                target_offset,
+            )?;
         }
     }
     Ok(text)

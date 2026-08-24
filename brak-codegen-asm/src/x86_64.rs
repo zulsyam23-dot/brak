@@ -71,9 +71,11 @@ fn emit_inst(inst: &LirInst, alloc: &mut regalloc::SimpleAlloc) -> String {
         LirOpcode::Ret => {
             if let Some(op) = inst.operands.first() {
                 let val = format_op(op, alloc);
-                format!("mov rax, {val}\n  ret")
+                // BUG-K08: every Ret must restore the frame — a single trailing
+                // epilogue left mid-function returns with a corrupted stack.
+                format!("mov rax, {val}\n  mov rsp, rbp\n  pop rbp\n  ret")
             } else {
-                "ret".to_string()
+                "mov rsp, rbp\n  pop rbp\n  ret".to_string()
             }
         }
         LirOpcode::Comment => {
@@ -111,6 +113,20 @@ fn emit_inst(inst: &LirInst, alloc: &mut regalloc::SimpleAlloc) -> String {
                 })
                 .unwrap_or_default();
             format!("test {cond}, {cond}\n  jnz {then_label}\n  jmp {else_label}")
+        }
+        LirOpcode::Div => {
+            // BUG-K08: Div previously fell into the generic path emitting a bare
+            // `idiv` without loading rdx:rax — wrong results / UB.
+            let dest = inst.dest
+                .map(|d| regalloc::virt_to_name(alloc.map(d)))
+                .unwrap_or_default();
+            let lhs = inst.operands.first()
+                .map(|o| format_op(o, alloc))
+                .unwrap_or_default();
+            let rhs = inst.operands.get(1)
+                .map(|o| format_op(o, alloc))
+                .unwrap_or_default();
+            format!("push rax\n  push rdx\n  mov rax, {lhs}\n  cqo\n  idiv {rhs}\n  mov {dest}, rax\n  pop rdx\n  pop rax")
         }
         LirOpcode::Mod => {
             let dest = inst.dest

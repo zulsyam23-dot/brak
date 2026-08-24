@@ -1,5 +1,9 @@
 //! Persistent IR cache using content-addressed storage.
 //!
+//! ⚠️ **Experimental — not yet wired into any pipeline** (prioritas.md
+//! BUG-M06). Cache keys are caller-supplied hashes without a compiler-version
+//! salt; entries are not validated on load.
+//!
 //! Each IR node is serialized to JSON and stored on disk keyed by its
 //! `ContentHash`. Only nodes whose content hash differs from the cached
 //! version are re-serialized, enabling incremental compilation.

@@ -14,7 +14,7 @@ pub fn link_macho(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result
     let merged_text = apply_all_relocs(&parsed, &global_syms, &merged_text, &text_bases, base_addr, 0)?;
 
     // ── Build _start stub ──────────────────────────────
-    let entry_offset = find_entry_offset(&parsed, &global_syms, &text_bases, entry);
+    let entry_offset = find_entry_offset(&parsed, &global_syms, &text_bases, entry)?;
     let start_stub = build_macho_start_stub(entry_offset);
     let mut full_text = start_stub;
     full_text.extend_from_slice(&merged_text);
@@ -155,3 +155,4 @@ fn build_macho_start_stub(entry_offset_in_text: u64) -> Vec<u8> {
     stub[3..7].copy_from_slice(&call_rel32.to_le_bytes());
     stub
 }
+

@@ -150,7 +150,7 @@ pub enum HirExpr {
     Block(HirBlock),
     Match {
         expr: Box<HirExpr>,
-        arms: Vec<(HirExpr, HirExpr)>, // (pattern, body)
+        arms: Vec<(HirPattern, HirExpr)>, // (pattern, body)
         span: Span,
     },
     Field {
@@ -169,6 +169,51 @@ pub enum HirExpr {
         value: Box<HirExpr>,
         span: Span,
     },
+}
+
+/// Match arm pattern (BUG-K03: previously flattened to a string, losing all
+/// structure — match always executed the first arm).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HirPattern {
+    /// `_` — matches anything
+    Wildcard,
+    /// `name` — matches anything and binds the scrutinee to `name`
+    Binding(String),
+    /// literal pattern — compared against the scrutinee with Eq
+    Literal(HirLiteral),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HirLiteral {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl ContentHash for HirLiteral {
+    fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(self).hash(&mut hasher);
+        match self {
+            HirLiteral::Int(i) => i.hash(&mut hasher),
+            HirLiteral::Float(f) => f.to_bits().hash(&mut hasher),
+            HirLiteral::Bool(b) => b.hash(&mut hasher),
+            HirLiteral::Str(s) => s.hash(&mut hasher),
+        }
+        hasher.finish()
+    }
+}
+
+impl ContentHash for HirPattern {
+    fn content_hash(&self) -> u64 {
+        match self {
+            HirPattern::Wildcard => 1,
+            HirPattern::Binding(s) => s.content_hash(),
+            HirPattern::Literal(l) => l.content_hash(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +257,27 @@ impl HirExpr {
             HirExpr::Field { span, .. } => *span,
             HirExpr::StructInit { span, .. } => *span,
             HirExpr::FieldAssign { span, .. } => *span,
+        }
+    }
+}
+
+impl std::fmt::Display for HirLiteral {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HirLiteral::Int(i) => write!(f, "{i}"),
+            HirLiteral::Float(x) => write!(f, "{x}"),
+            HirLiteral::Bool(b) => write!(f, "{b}"),
+            HirLiteral::Str(s) => write!(f, "\"{s}\""),
+        }
+    }
+}
+
+impl std::fmt::Display for HirPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HirPattern::Wildcard => write!(f, "_"),
+            HirPattern::Binding(s) => write!(f, "{s}"),
+            HirPattern::Literal(l) => write!(f, "{l}"),
         }
     }
 }
@@ -361,7 +427,14 @@ impl ContentHash for HirExpr {
                 h
             }
             HirExpr::Block(b) => b.content_hash(),
-            HirExpr::Match { expr, .. } => expr.content_hash(),
+            HirExpr::Match { expr, arms, .. } => {
+                let mut h = expr.content_hash();
+                for (pat, body) in arms {
+                    h = combine_hash(h, pat.content_hash());
+                    h = combine_hash(h, body.content_hash());
+                }
+                h
+            }
             HirExpr::Field { object, field, .. } => combine_hash(object.content_hash(), field.content_hash()),
             HirExpr::StructInit { name, fields, .. } => {
                 let mut h = name.content_hash();

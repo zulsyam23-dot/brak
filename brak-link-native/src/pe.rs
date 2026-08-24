@@ -9,6 +9,22 @@ const TEXT_RVA: u64 = SEC_ALIGN;
 const TEXT_RAW_OFF: u64 = FILE_ALIGN;
 
 pub fn link_pe(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<LinkerOutput> {
+    link_pe_impl(objects, Some(entry), base_addr, false)
+}
+
+/// BUG-H02 FIXED: produce a REAL PE shared library — IMAGE_FILE_DLL
+/// characteristic, no CRT-style entry stub, and an export directory listing
+/// every defined global symbol so LoadLibrary/GetProcAddress work.
+pub fn link_pe_shared(objects: &[ObjectFile], base_addr: u64) -> Result<LinkerOutput> {
+    link_pe_impl(objects, None, base_addr, true)
+}
+
+fn link_pe_impl(
+    objects: &[ObjectFile],
+    entry: Option<&str>,
+    base_addr: u64,
+    is_dll: bool,
+) -> Result<LinkerOutput> {
     if objects.is_empty() {
         return Err("no object files to link".into());
     }
@@ -17,20 +33,99 @@ pub fn link_pe(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<Li
     let global_syms = build_global_sym_map(&parsed);
     let (merged_text, text_bases) = merge_text(&parsed);
 
-    // ── Build import data + stub ───────────────────────
-    let import_layout = import_data_layout();
-    let import_data = build_import_data(&import_layout);
-    let entry_offset = find_entry_offset(&parsed, &global_syms, &text_bases, entry);
-    let start_stub = build_pe_start_stub(entry_offset, &import_layout);
+    // ── Build import data + stub (executables only) ────
+    let mut import_data = Vec::new();
+    let mut start_stub = Vec::new();
+    let mut import_layout = import_data_layout();
+    let text_start_in_full;
+    if !is_dll {
+        let layout = import_data_layout();
+        let entry_offset = find_entry_offset(
+            &parsed, &global_syms, &text_bases,
+            entry.ok_or("internal: exe without entry name")?,
+        )?;
+        start_stub = build_pe_start_stub(entry_offset, &layout);
+        import_data = build_import_data(&layout);
+        import_layout = layout;
+        text_start_in_full = (import_data.len() + start_stub.len()) as u64;
+    } else {
+        text_start_in_full = 0;
+    }
 
-    // TEXT RVA starts at 0x1000
-    // full_text = [import_data] [start_stub] [merged_text]
-    let text_start_in_full = (import_data.len() + start_stub.len()) as u64;
     let final_text_body = apply_all_relocs(&parsed, &global_syms, &merged_text, &text_bases, base_addr, TEXT_RVA + text_start_in_full)?;
 
     let mut full_text = import_data;
     full_text.extend_from_slice(&start_stub);
     full_text.extend_from_slice(&final_text_body);
+
+    // ── Export directory (shared libraries) ────────────
+    // Layout: [IMAGE_EXPORT_DIRECTORY 40B][address table][name ptrs]
+    //         [ordinals u16][names blob][dll name]
+    let mut edata: Vec<u8> = Vec::new();
+    let mut export_dir_rva = 0u64;
+    let mut export_dir_size = 0u64;
+    if is_dll {
+        // Pad to the same 16-byte boundary that base_rva assumes below.
+        while full_text.len() % 16 != 0 { full_text.push(0); }
+        let mut exports: Vec<(String, u64)> = Vec::new();
+        for (oi, p) in parsed.iter().enumerate() {
+            for sym in &p.symbols {
+                if !sym.name.is_empty() && sym.st_shndx != 0 && (sym.st_info >> 4) == STB_GLOBAL {
+                    exports.push((sym.name.clone(), TEXT_RVA + text_bases[oi] + sym.st_value));
+                }
+            }
+        }
+        if exports.is_empty() {
+            return Err("cannot build a shared library with no exported symbols".into());
+        }
+        exports.sort_by(|a, b| a.0.cmp(&b.0)); // loaders binary-search names
+
+        let n = exports.len();
+        let dir_size = 40u64;
+        let addr_table_off = dir_size;
+        let name_ptr_off = addr_table_off + (n * 4) as u64;
+        let ordinal_off = name_ptr_off + (n * 4) as u64;
+        let names_off = ordinal_off + (n * 2) as u64;
+
+        let base_rva = TEXT_RVA + round_up(full_text.len() as u64, 16);
+        // Compute name-string RVAs inside the names blob first.
+        let mut name_blob = Vec::new();
+        let mut name_rvas = Vec::with_capacity(n);
+        for (name, _) in &exports {
+            name_rvas.push(base_rva + names_off + name_blob.len() as u64);
+            name_blob.extend_from_slice(name.as_bytes());
+            name_blob.push(0);
+        }
+        // DLL name string last.
+        let dll_name = b"brak.dll\0";
+        let dll_name_rva = base_rva + names_off + name_blob.len() as u64;
+        name_blob.extend_from_slice(dll_name);
+
+        let total_edata = names_off + name_blob.len() as u64;
+        export_dir_rva = base_rva;
+        export_dir_size = total_edata;
+
+        edata.reserve(total_edata as usize);
+        write_u32(&mut edata, 0); // Characteristics
+        write_u32(&mut edata, 0); // TimeDateStamp
+        write_u16(&mut edata, 0); // MajorVersion
+        write_u16(&mut edata, 0); // MinorVersion
+        write_u32(&mut edata, dll_name_rva as u32); // Name
+        write_u32(&mut edata, 1); // OrdinalBase
+        write_u32(&mut edata, n as u32); // AddressTableEntries
+        write_u32(&mut edata, n as u32); // NumberOfNamePointers
+        write_u32(&mut edata, (base_rva + addr_table_off) as u32); // ExportAddressTableRva
+        write_u32(&mut edata, (base_rva + name_ptr_off) as u32); // NamePointerRva
+        write_u32(&mut edata, (base_rva + ordinal_off) as u32); // OrdinalTableRva
+        debug_assert_eq!(edata.len(), dir_size as usize);
+        for (_, addr) in &exports { write_u32(&mut edata, *addr as u32); }
+        for rva in &name_rvas { write_u32(&mut edata, *rva as u32); }
+        for i in 0..n { write_u16(&mut edata, i as u16); }
+        edata.extend_from_slice(&name_blob);
+        debug_assert_eq!(edata.len(), total_edata as usize);
+    }
+
+    full_text.extend_from_slice(&edata);
     let full_text_size = full_text.len() as u64;
     let import_data_len = import_layout.total as u32;
 
@@ -104,7 +199,9 @@ pub fn link_pe(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<Li
     write_u32(&mut buf, 0);
     write_u32(&mut buf, 0);
     write_u16(&mut buf, 240);
-    write_u16(&mut buf, 0x0022);
+    // BUG-H02: DLLs get IMAGE_FILE_DLL (0x2000) on top of EXECUTABLE_IMAGE |
+    // LARGE_ADDRESS_AWARE.
+    write_u16(&mut buf, if is_dll { 0x2022 } else { 0x0022 });
 
     // ── OPTIONAL HEADER PE32+ (240 bytes) ──────────────
     write_u16(&mut buf, 0x20B);
@@ -113,7 +210,13 @@ pub fn link_pe(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<Li
     write_u32(&mut buf, round_up(full_text_size, FILE_ALIGN) as u32);
     write_u32(&mut buf, import_data_len + if has_debug { debug_raw_size as u32 } else { 0 });
     write_u32(&mut buf, 0);
-    write_u32(&mut buf, (TEXT_RVA + import_layout.total) as u32);
+    write_u32(
+        &mut buf,
+        match entry {
+            Some(_) => (TEXT_RVA + import_layout.total) as u32,
+            None => 0, // DLLs have no mandatory entry point
+        },
+    );
     write_u32(&mut buf, TEXT_RVA as u32);
     write_u64(&mut buf, base_addr);
     write_u32(&mut buf, SEC_ALIGN as u32);
@@ -138,11 +241,24 @@ pub fn link_pe(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<Li
     write_u32(&mut buf, 16);
 
     // Data directories (16 x 8 bytes)
+    // BUG-H09: directory[1] used to span the ENTIRE import blob (descriptors +
+    // lookup table + hint/name + IAT) while directory[12] (IAT) stayed zero.
+    // Strict loaders expect [1] to cover only IMAGE_IMPORT_DESCRIPTORs and [12]
+    // to describe the Import Address Table.
+    let iat_rva_dir = TEXT_RVA + import_layout.iat_off;
     for i in 0..16 {
         match i {
-            1 => {
+            0 if is_dll => {
+                write_u32(&mut buf, export_dir_rva as u32);
+                write_u32(&mut buf, export_dir_size as u32);
+            }
+            1 if !is_dll => {
                 write_u32(&mut buf, TEXT_RVA as u32);
-                write_u32(&mut buf, import_data_len as u32);
+                write_u32(&mut buf, import_layout.desc_size as u32);
+            }
+            12 if !is_dll => {
+                write_u32(&mut buf, iat_rva_dir as u32);
+                write_u32(&mut buf, 16); // one function thunk + null terminator
             }
             6 if has_debug => {
                 write_u32(&mut buf, debug_rva as u32);
@@ -289,3 +405,4 @@ fn build_pe_start_stub(entry_offset_in_text: u64, layout: &ImportLayout) -> Vec<
 fn round_up(v: u64, align: u64) -> u64 {
     (v + align - 1) & !(align - 1)
 }
+

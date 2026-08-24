@@ -135,15 +135,22 @@ mod tests {
             instrs.push(instr.to_string());
         }
 
-        // Verify main function: mov args to rdi/rsi, call add, mov rax to rcx
+        // Verify main function: mov args to the host convention's arg regs,
+        // call add, store rax to dest slot. On Windows that is rcx/rdx
+        // (Win64); elsewhere rdi/rsi (SysV).
+        let (first_arg, second_arg) = if cfg!(target_os = "windows") {
+            ("mov rcx,", "mov rdx,")
+        } else {
+            ("mov rdi,", "mov rsi,")
+        };
         let idx_main_call = instrs.iter().position(|i| i.contains("call"));
         assert!(idx_main_call.is_some(), "should have a call instruction:\n{instrs:#?}");
         let idx = idx_main_call.unwrap();
         let pre_call = &instrs[..idx];
-        let mov_rdi = pre_call.iter().position(|i| i.starts_with("mov rdi,"));
-        let mov_rsi = pre_call.iter().position(|i| i.starts_with("mov rsi,"));
-        assert!(mov_rdi.is_some(), "expected mov rdi before call:\n{instrs:#?}");
-        assert!(mov_rsi.is_some(), "expected mov rsi before call:\n{instrs:#?}");
+        let mov_rdi = pre_call.iter().position(|i| i.starts_with(first_arg));
+        let mov_rsi = pre_call.iter().position(|i| i.starts_with(second_arg));
+        assert!(mov_rdi.is_some(), "expected {first_arg} before call:\n{instrs:#?}");
+        assert!(mov_rsi.is_some(), "expected {second_arg} before call:\n{instrs:#?}");
         assert!(
             mov_rdi.unwrap() < mov_rsi.unwrap(),
             "mov rdi should come before mov rsi"

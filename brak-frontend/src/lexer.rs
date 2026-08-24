@@ -32,6 +32,7 @@ pub enum TokenKind {
     Greater,
     GreaterEquals,
     Arrow,
+    FatArrow,
     Ampersand,
     AndAnd,
     Pipe,
@@ -198,6 +199,20 @@ impl AsciiLexer {
         lexeme.push('"');
         while let Some(c) = self.peek() {
             self.advance();
+            // BUG-M04: escape sequences were copied verbatim — `"a\"b"`
+            // terminated at the escaped quote and left garbage tokens behind.
+            if c == '\\' {
+                match self.peek() {
+                    Some(e @ ('"' | '\\')) => { self.advance(); lexeme.push('\\'); lexeme.push(e); }
+                    other => {
+                        // Unterminated or stray escape: keep as-is; the parser's
+                        // string handling reports the malformed token.
+                        let _ = other;
+                        lexeme.push(c);
+                    }
+                }
+                continue;
+            }
             lexeme.push(c);
             if c == '"' {
                 break;
@@ -385,6 +400,9 @@ impl BrakLexer for AsciiLexer {
                             if self.peek() == Some('=') {
                                 self.advance();
                                 (TokenKind::EqualsEquals, "==")
+                            } else if self.peek() == Some('>') {
+                                self.advance();
+                                (TokenKind::FatArrow, "=>")
                             } else {
                                 (TokenKind::Equals, "=")
                             }

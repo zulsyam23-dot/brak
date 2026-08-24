@@ -53,3 +53,25 @@ impl LinkerBackend for NativeLinker {
         }
     }
 }
+
+impl NativeLinker {
+    /// BUG-H02: build a real shared library. Currently only the PE (Windows)
+    /// path is implemented — IMAGE_FILE_DLL + export directory.
+    pub fn link_shared(&self, objects: &[ObjectFile], base_addr: u64) -> Result<LinkerOutput> {
+        let force = std::env::var("BRK_LINK_FORMAT").ok();
+        let is_windows_like = match force.as_deref() {
+            Some("pe") => true,
+            Some("elf") | Some("macho") => false,
+            _ => cfg!(target_os = "windows"),
+        };
+        if is_windows_like {
+            pe::link_pe_shared(objects, base_addr)
+        } else {
+            Err(
+                "shared libraries are only supported for PE (Windows) targets \
+                 right now; ELF ET_DYN / Mach-O dylib are not implemented yet"
+                    .into(),
+            )
+        }
+    }
+}

@@ -754,11 +754,39 @@ impl Parser {
 
         match tok.kind {
             TokenKind::Number => {
+                // BUG-M17: float literals were parsed as i64 — every decimal
+                // literal failed with "invalid number".
+                if tok.lexeme.contains('.') {
+                    let val: f64 = match tok.lexeme.parse() {
+                        Ok(v) => v,
+                        Err(_) => { self.error(format!("invalid float literal `{}`", tok.lexeme), None); return Err(()); }
+                    };
+                    return Ok(Expr::Float(val, tok.span));
+                }
                 let val: i64 = match tok.lexeme.parse() { Ok(v) => v, Err(_) => { self.error("invalid number".to_string(), None); return Err(()); } };
                 Ok(Expr::Int(val, tok.span))
             }
             TokenKind::String => {
-                let s = tok.lexeme.trim_matches('"').to_string();
+                // BUG-M04: decode the escapes the lexer preserved verbatim.
+                let raw = tok.lexeme.trim_matches('"');
+                let mut s = String::with_capacity(raw.len());
+                let mut chars = raw.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        match chars.next() {
+                            Some('"') => s.push('"'),
+                            Some('\\') => s.push('\\'),
+                            Some('n') => s.push('\n'),
+                            Some('t') => s.push('\t'),
+                            Some('r') => s.push('\r'),
+                            Some('0') => s.push('\0'),
+                            Some(other) => { s.push('\\'); s.push(other); }
+                            None => s.push('\\'),
+                        }
+                    } else {
+                        s.push(c);
+                    }
+                }
                 Ok(Expr::String(s, tok.span))
             }
             TokenKind::True => Ok(Expr::Bool(true, tok.span)),
@@ -791,7 +819,10 @@ impl Parser {
                         args,
                         span: Span::new(call_start, end),
                     })
-                } else if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LBrace) {
+                } else if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LBrace)
+                    && matches!(tokens.get(*pos + 1).map(|t| t.kind), Some(TokenKind::Ident))
+                    && matches!(tokens.get(*pos + 2).map(|t| t.kind), Some(TokenKind::Colon))
+                {
                     *pos += 1; // consume {
                     let mut fields = vec![];
                     while tokens.get(*pos).map(|t| t.kind) != Some(TokenKind::RBrace) {
@@ -853,7 +884,8 @@ impl Parser {
         let mut arms = vec![];
         while tokens.get(*pos).map(|t| t.kind) != Some(TokenKind::RBrace) {
             let pattern = self.parse_pattern(tokens, pos)?;
-            self.expect_noerr(TokenKind::Arrow, tokens, pos);
+            // Match arms use `=>` (FatArrow); `->` is reserved for return types.
+            self.expect_noerr(TokenKind::FatArrow, tokens, pos);
             let body = self.parse_expr(tokens, pos)?;
             if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Comma) {
                 *pos += 1;
@@ -990,7 +1022,9 @@ impl Parser {
             TokenKind::Shl | TokenKind::Shr => Some(8),
             TokenKind::Plus | TokenKind::Minus => Some(9),
             TokenKind::Star | TokenKind::Slash | TokenKind::Percent => Some(10),
-            TokenKind::DoubleDot => Some(11),
+            // BUG-M02: `..` bound tighter than `*` — `0..n*2` parsed as
+            // `(0..n)*2`. Ranges are normally the LOWEST-binding operator.
+            TokenKind::DoubleDot => Some(1),
             _ => None,
         }
     }
@@ -1476,7 +1510,8 @@ mod tests {
 
     #[test]
     fn test_parse_match_expr() {
-        let prog = parse("fn f(x) { return match x { 1 -> 2, _ -> 0 }; }");
+        // Match arms use `=>` (FatArrow); `->` is reserved for return types.
+        let prog = parse("fn f(x) { return match x { 1 => 2, _ => 0 }; }");
         assert_eq!(prog.items.len(), 1);
     }
 

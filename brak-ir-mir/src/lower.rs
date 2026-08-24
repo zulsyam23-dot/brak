@@ -275,9 +275,14 @@ impl MirLower {
 
                     // Body blocks
                     for mut b in body_blocks {
-                        if let MirTerminator::Return { .. } = &b.terminator {
-                            // synthetic Return — redirect back to while condition
-                            b.terminator = MirTerminator::Jump { target: cond_header + 1, span: *span };
+                        // Only the synthetic fall-through Return is redirected back to
+                        // the condition. A block named "unreachable" holds a REAL
+                        // `return` statement and must keep its Return terminator
+                        // (BUG-K01: previously all Returns became `continue`).
+                        if b.name != "unreachable" {
+                            if let MirTerminator::Return { .. } = &b.terminator {
+                                b.terminator = MirTerminator::Jump { target: cond_header + 1, span: *span };
+                            }
                         }
                         // blocks with Jump, Branch, etc. keep their terminator (internal control flow)
                         b.id = blocks.len();
@@ -342,12 +347,15 @@ impl MirLower {
                     // Lower body with var in local_map
                     let mut body_blocks = self.lower_block_to_cfg(body)?;
                     let body_start = for_start + 3;
-                    let after_for = body_start + body_blocks.len();
+                    // Latch block holds the increment; both normal iteration end and
+                    // `continue` route through it so the counter always advances.
+                    let latch_id = body_start + body_blocks.len();
+                    let after_for = latch_id + 1;
 
                     remap_block_ids(&mut body_blocks, body_start);
 
                     self.loop_stack.push(LoopContext {
-                        continue_target: for_start + 2,
+                        continue_target: latch_id,
                         break_target: after_for,
                     });
 
@@ -380,36 +388,52 @@ impl MirLower {
                         span: block_span,
                     });
 
-                    // Body blocks — add var = var + 1 at end, then jump back to cond
+                    // Body blocks — synthetic fall-through jumps to the latch; a REAL
+                    // `return` (block named "unreachable") keeps its Return terminator
+                    // (BUG-K01).
                     for mut b in body_blocks {
-                        if let MirTerminator::Return { .. } = &b.terminator {
-                            let one_local = self.fresh_local();
-                            self.locals.push(MirLocal {
-                                name: format!("for_inc_{var}"),
-                                ty: MirType::I32,
-                            });
-                            b.insts.push(MirInst::Assign {
-                                dest: one_local,
-                                value: MirValue::Int(1),
-                                span: *span,
-                            });
-                            b.insts.push(MirInst::Assign {
-                                dest: var_local,
-                                value: MirValue::BinOp {
-                                    op: MirBinOp::Add,
-                                    lhs: var_local,
-                                    rhs: one_local,
-                                },
-                                span: *span,
-                            });
-                            b.terminator = MirTerminator::Jump {
-                                target: for_start + 2,
-                                span: *span,
-                            };
+                        if b.name != "unreachable" {
+                            if let MirTerminator::Return { .. } = &b.terminator {
+                                b.terminator = MirTerminator::Jump {
+                                    target: latch_id,
+                                    span: *span,
+                                };
+                            }
                         }
                         b.id = blocks.len();
                         blocks.push(b);
                     }
+
+                    // Latch: var = var + 1, then back to cond
+                    let one_local = self.fresh_local();
+                    self.locals.push(MirLocal {
+                        name: format!("for_inc_{var}"),
+                        ty: MirType::I32,
+                    });
+                    let mut latch_insts = vec![MirInst::Assign {
+                        dest: one_local,
+                        value: MirValue::Int(1),
+                        span: *span,
+                    }];
+                    latch_insts.push(MirInst::Assign {
+                        dest: var_local,
+                        value: MirValue::BinOp {
+                            op: MirBinOp::Add,
+                            lhs: var_local,
+                            rhs: one_local,
+                        },
+                        span: *span,
+                    });
+                    blocks.push(MirBlock {
+                        id: latch_id,
+                        name: format!("for_latch_{var}"),
+                        insts: latch_insts,
+                        terminator: MirTerminator::Jump {
+                            target: for_start + 2,
+                            span: *span,
+                        },
+                        span: block_span,
+                    });
 
                     self.loop_stack.pop();
 
@@ -443,11 +467,15 @@ impl MirLower {
                     });
 
                     for mut b in body_blocks {
-                        if let MirTerminator::Return { .. } = &b.terminator {
-                            b.terminator = MirTerminator::Jump {
-                                target: body_start,
-                                span: *span,
-                            };
+                        // Real `return` (named "unreachable") keeps Return (BUG-K01);
+                        // only the synthetic fall-through loops back.
+                        if b.name != "unreachable" {
+                            if let MirTerminator::Return { .. } = &b.terminator {
+                                b.terminator = MirTerminator::Jump {
+                                    target: body_start,
+                                    span: *span,
+                                };
+                            }
                         }
                         b.id = blocks.len();
                         blocks.push(b);
@@ -473,6 +501,11 @@ impl MirLower {
                         });
                         current_insts = vec![];
                         current_name = "unreachable".to_string();
+                    } else {
+                        self.diagnostics.push(
+                            brak_core::Diagnostic::error("`break` outside of a loop")
+                                .with_span(*span),
+                        );
                     }
                 }
                 HirStmt::Continue(span) => {
@@ -490,6 +523,11 @@ impl MirLower {
                         });
                         current_insts = vec![];
                         current_name = "unreachable".to_string();
+                    } else {
+                        self.diagnostics.push(
+                            brak_core::Diagnostic::error("`continue` outside of a loop")
+                                .with_span(*span),
+                        );
                     }
                 }
             }
@@ -584,15 +622,45 @@ impl MirLower {
             HirExpr::BinOp { op, lhs, rhs, span } => {
                 let lhs_id = self.emit_expr(lhs, insts, current_name, blocks)?;
                 let rhs_id = self.emit_expr(rhs, insts, current_name, blocks)?;
+                let mut mir_op = match lower_mir_binop(*op) {
+                    Some(op) => op,
+                    None => {
+                        self.diagnostics.push(
+                            brak_core::Diagnostic::error(
+                                "range expressions are not yet supported in this position",
+                            )
+                            .with_span(*span),
+                        );
+                        return Err(());
+                    }
+                };
+                // BUG-M17: pick the FLOAT variant when either operand is a
+                // float-typed local, so backends emit SSE/f64 arithmetic
+                // instead of silently treating bits as integers.
+                let is_float = |id: LocalId| matches!(
+                    self.locals.get(id).map(|l| &l.ty),
+                    Some(MirType::F32 | MirType::F64)
+                );
+                let float_arith = matches!(mir_op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div)
+                    && (is_float(lhs_id) || is_float(rhs_id));
+                if float_arith {
+                    mir_op = match mir_op {
+                        MirBinOp::Add => MirBinOp::FAdd,
+                        MirBinOp::Sub => MirBinOp::FSub,
+                        MirBinOp::Mul => MirBinOp::FMul,
+                        MirBinOp::Div => MirBinOp::FDiv,
+                        other => other,
+                    };
+                }
                 let id = self.fresh_local();
                 self.locals.push(MirLocal {
                     name: format!("tmp_{id}"),
-                    ty: MirType::I32,
+                    ty: if float_arith { MirType::F64 } else { MirType::I32 },
                 });
                 insts.push(MirInst::Assign {
                     dest: id,
                     value: MirValue::BinOp {
-                        op: lower_mir_binop(*op),
+                        op: mir_op,
                         lhs: lhs_id,
                         rhs: rhs_id,
                     },
@@ -672,23 +740,8 @@ impl MirLower {
                     Ok(id)
                 }
             }
-            HirExpr::Match { expr: scrutinee, arms, .. } => {
-                let _scrut_id = self.emit_expr(scrutinee, insts, current_name, blocks)?;
-                if let Some((_, first_arm)) = arms.first() {
-                    self.emit_expr(first_arm, insts, current_name, blocks)
-                } else {
-                    let id = self.fresh_local();
-                    self.locals.push(MirLocal {
-                        name: format!("tmp_{id}"),
-                        ty: MirType::I32,
-                    });
-                    insts.push(MirInst::Assign {
-                        dest: id,
-                        value: MirValue::Int(0),
-                        span: Span::new(Default::default(), Default::default()),
-                    });
-                    Ok(id)
-                }
+            HirExpr::Match { expr: scrutinee, arms, span } => {
+                self.lower_match_expr(scrutinee, arms, *span, insts, current_name, blocks)
             }
             HirExpr::Field { object, field, span } => {
                 let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
@@ -749,6 +802,189 @@ impl MirLower {
                 Ok(id)
             }
         }
+    }
+
+    /// Lower a match expression into a chain of comparison blocks (BUG-K03).
+    ///
+    /// Layout: dispatch → [check_i → body_i]* → merge. The first Wildcard/Binding
+    /// arm catches everything after it; the last effective arm is an unconditional
+    /// fallback (no check) — standard "final arm catches all" convention.
+    fn lower_match_expr(
+        &mut self,
+        scrutinee: &HirExpr,
+        arms: &[(HirPattern, HirExpr)],
+        span: Span,
+        insts: &mut Vec<MirInst>,
+        current_name: &mut String,
+        blocks: &mut Vec<MirBlock>,
+    ) -> Result<LocalId, ()> {
+        let dummy = || Span::new(Default::default(), Default::default());
+
+        let result_local = self.fresh_local();
+        self.locals.push(MirLocal {
+            name: format!("tmp_{result_local}"),
+            ty: MirType::I32,
+        });
+
+        if arms.is_empty() {
+            // typeck already rejects this; emit 0 so lowering stays total.
+            insts.push(MirInst::Assign {
+                dest: result_local,
+                value: MirValue::Int(0),
+                span,
+            });
+            return Ok(result_local);
+        }
+
+        let scrut_id = self.emit_expr(scrutinee, insts, current_name, blocks)?;
+
+        // Effective arms: everything up to & including first non-literal pattern.
+        let mut eff_len = arms.len();
+        for (i, (pat, _)) in arms.iter().enumerate() {
+            if !matches!(pat, HirPattern::Literal(_)) {
+                eff_len = i + 1;
+                break;
+            }
+        }
+
+        // Lower all effective arm bodies up-front into separate block vectors
+        // (each numbered from 0) so layout offsets can be computed exactly.
+        let mut body_block_sets: Vec<Vec<MirBlock>> = Vec::new();
+        for (_, body) in arms.iter().take(eff_len) {
+            let synth = HirBlock {
+                stmts: vec![HirStmt::Expr(Box::new(body.clone()), body.span())],
+                span: dummy(),
+            };
+            body_block_sets.push(self.lower_block_to_cfg(&synth)?);
+        }
+
+        // Compute positions: dispatch, then per-arm [check?][body], then merge.
+        let dispatch_id = blocks.len();
+        let mut entry = vec![0usize; eff_len];
+        let mut body_pos = vec![0usize; eff_len];
+        let mut cursor = dispatch_id + 1;
+        for i in 0..eff_len {
+            entry[i] = cursor;
+            let is_last = i == eff_len - 1;
+            let needs_check = !is_last && matches!(arms[i].0, HirPattern::Literal(_));
+            if needs_check {
+                cursor += 1;
+            }
+            body_pos[i] = cursor;
+            cursor += body_block_sets[i].len();
+        }
+        let merge = cursor;
+
+        // Dispatch block consumes whatever the caller had pending.
+        blocks.push(MirBlock {
+            id: dispatch_id,
+            name: current_name.clone(),
+            insts: std::mem::take(insts),
+            terminator: MirTerminator::Jump { target: entry[0], span },
+            span: dummy(),
+        });
+
+        for i in 0..eff_len {
+            let is_last = i == eff_len - 1;
+
+            // Check block: compare scrutinee against a literal pattern.
+            if !is_last {
+                if let HirPattern::Literal(lit) = &arms[i].0 {
+                    let value = match lit {
+                        HirLiteral::Int(v) => MirValue::Int(*v),
+                        HirLiteral::Float(v) => MirValue::Float(*v),
+                        HirLiteral::Bool(v) => MirValue::Bool(*v),
+                        HirLiteral::Str(v) => MirValue::String(v.clone()),
+                    };
+                    // BinOp operands are locals: materialize the literal first.
+                    let pat_local = self.fresh_local();
+                    self.locals.push(MirLocal {
+                        name: format!("match_pat_{i}"),
+                        ty: MirType::I32,
+                    });
+                    let cond_local = self.fresh_local();
+                    self.locals.push(MirLocal {
+                        name: format!("match_cond_{i}"),
+                        ty: MirType::Bool,
+                    });
+                    blocks.push(MirBlock {
+                        id: entry[i],
+                        name: format!("match_check_{i}"),
+                        insts: vec![
+                            MirInst::Assign {
+                                dest: pat_local,
+                                value,
+                                span,
+                            },
+                            MirInst::Assign {
+                                dest: cond_local,
+                                value: MirValue::BinOp {
+                                    op: MirBinOp::Eq,
+                                    lhs: scrut_id,
+                                    rhs: pat_local,
+                                },
+                                span,
+                            },
+                        ],
+                        terminator: MirTerminator::Branch {
+                            cond: cond_local,
+                            then: body_pos[i],
+                            else_: entry[i + 1],
+                            span: span,
+                        },
+                        span: dummy(),
+                    });
+                }
+            }
+
+            // Binding pattern: assign scrutinee to the bound name before the body.
+            let bind_insts: Vec<MirInst> = match &arms[i].0 {
+                HirPattern::Binding(name) => {
+                    let l = self.get_or_create_local(name, MirType::I32);
+                    vec![MirInst::Assign {
+                        dest: l,
+                        value: MirValue::Local(scrut_id),
+                        span,
+                    }]
+                }
+                _ => vec![],
+            };
+
+            let mut set = std::mem::take(&mut body_block_sets[i]);
+            remap_block_ids(&mut set, body_pos[i]);
+            if !bind_insts.is_empty() {
+                if let Some(first) = set.first_mut() {
+                    let mut merged = bind_insts;
+                    merged.append(&mut first.insts);
+                    first.insts = merged;
+                }
+            }
+            // Rewrite the fall-through end of the arm to produce the result and
+            // jump to merge; a REAL `return` (named "unreachable") stays intact.
+            if let Some(last) = set.last_mut() {
+                if last.name != "unreachable" {
+                    if let MirTerminator::Return { value: Some(val), .. } = &last.terminator {
+                        last.insts.push(MirInst::Assign {
+                            dest: result_local,
+                            value: MirValue::Local(*val),
+                            span,
+                        });
+                    }
+                    last.terminator = MirTerminator::Jump { target: merge, span };
+                }
+            }
+            for mut b in set {
+                // remap_block_ids fixed terminator targets; ids must be assigned
+                // at push time to match the layout positions.
+                b.id = blocks.len();
+                blocks.push(b);
+            }
+        }
+
+        // Merge block materializes as the next block pushed by the caller
+        // (same deferred-merge scheme as if-expressions — BUG-K02).
+        *current_name = "match_merge".to_string();
+        Ok(result_local)
     }
 
     fn lower_if_expr(
@@ -839,18 +1075,13 @@ impl MirLower {
             blocks.push(b);
         }
 
-        blocks.push(MirBlock {
-            id: blocks.len(),
-            name: "merge".to_string(),
-            insts: vec![],
-            terminator: MirTerminator::Return {
-                value: Some(result_local),
-                span: Span::new(Default::default(), Default::default()),
-            },
-            span: Span::new(Default::default(), Default::default()),
-        });
-
-        *current_name = "unreachable".to_string();
+        // BUG-K02: do NOT push the merge block here and do NOT terminate it with
+        // Return. The merge block materializes as the NEXT block pushed by the
+        // caller (id == blocks.len() right now), so statements after a mid-function
+        // if-expression keep executing. This mirrors how HirStmt::If handles merges.
+        *current_name = "if_expr_merge".to_string();
+        // current_insts was consumed into the branch block above; leave it empty so
+        // subsequent emissions land in the merge block.
 
         Ok(result_local)
     }
@@ -890,27 +1121,29 @@ fn lower_hir_type(ty: &HirType) -> MirType {
     }
 }
 
-fn lower_mir_binop(op: HirBinOp) -> MirBinOp {
+fn lower_mir_binop(op: HirBinOp) -> Option<MirBinOp> {
     match op {
-        HirBinOp::Add => MirBinOp::Add,
-        HirBinOp::Sub => MirBinOp::Sub,
-        HirBinOp::Mul => MirBinOp::Mul,
-        HirBinOp::Div => MirBinOp::Div,
-        HirBinOp::Mod => MirBinOp::Mod,
-        HirBinOp::Eq => MirBinOp::Eq,
-        HirBinOp::Ne => MirBinOp::Ne,
-        HirBinOp::Lt => MirBinOp::Lt,
-        HirBinOp::Le => MirBinOp::Le,
-        HirBinOp::Gt => MirBinOp::Gt,
-        HirBinOp::Ge => MirBinOp::Ge,
-        HirBinOp::And => MirBinOp::And,
-        HirBinOp::Or => MirBinOp::Or,
-        HirBinOp::BitAnd => MirBinOp::BitAnd,
-        HirBinOp::BitOr => MirBinOp::BitOr,
-        HirBinOp::BitXor => MirBinOp::BitXor,
-        HirBinOp::Shl => MirBinOp::Shl,
-        HirBinOp::Shr => MirBinOp::Shr,
-        HirBinOp::Range => MirBinOp::Add, // placeholder: range treated as add
+        HirBinOp::Add => Some(MirBinOp::Add),
+        HirBinOp::Sub => Some(MirBinOp::Sub),
+        HirBinOp::Mul => Some(MirBinOp::Mul),
+        HirBinOp::Div => Some(MirBinOp::Div),
+        HirBinOp::Mod => Some(MirBinOp::Mod),
+        HirBinOp::Eq => Some(MirBinOp::Eq),
+        HirBinOp::Ne => Some(MirBinOp::Ne),
+        HirBinOp::Lt => Some(MirBinOp::Lt),
+        HirBinOp::Le => Some(MirBinOp::Le),
+        HirBinOp::Gt => Some(MirBinOp::Gt),
+        HirBinOp::Ge => Some(MirBinOp::Ge),
+        HirBinOp::And => Some(MirBinOp::And),
+        HirBinOp::Or => Some(MirBinOp::Or),
+        HirBinOp::BitAnd => Some(MirBinOp::BitAnd),
+        HirBinOp::BitOr => Some(MirBinOp::BitOr),
+        HirBinOp::BitXor => Some(MirBinOp::BitXor),
+        HirBinOp::Shl => Some(MirBinOp::Shl),
+        HirBinOp::Shr => Some(MirBinOp::Shr),
+        // BUG-M14: range was silently lowered to Add. For-loop ranges are handled
+        // by the dedicated For lowering; a bare `a..b` is now an explicit error.
+        HirBinOp::Range => None,
     }
 }
 
@@ -1058,8 +1291,205 @@ mod tests {
         let ops = [Add, Sub, Mul, Div, Mod, Eq, Ne, Lt, Le, Gt, Ge, And, Or];
         for op in &ops {
             let mir_op = lower_mir_binop(*op);
-            let s = format!("{mir_op:?}");
-            assert!(!s.is_empty(), "MirBinOp should have all basic ops");
+            assert!(mir_op.is_some(), "MirBinOp should support {op:?}");
         }
+        assert!(lower_mir_binop(Range).is_none(), "Range must not silently become Add");
+    }
+
+    // --- Regression tests: BUG-K01 (return inside loop must stay a return) ---
+
+    fn count_real_returns(blocks: &[MirBlock]) -> usize {
+        blocks
+            .iter()
+            .filter(|b| matches!(b.terminator, MirTerminator::Return { .. }) && b.name == "unreachable")
+            .count()
+    }
+
+    #[test]
+    fn test_return_inside_while_stays_return() {
+        let hir_func = dummy_hir_fn("f", vec![
+            HirStmt::While {
+                cond: Box::new(HirExpr::Bool(true, dummy_span())),
+                body: HirBlock {
+                    stmts: vec![HirStmt::Return(
+                        Some(Box::new(HirExpr::Int(5, dummy_span()))),
+                        dummy_span(),
+                    )],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            },
+        ]);
+        let mut lowerer = MirLower::new();
+        let mir_func = lowerer.lower_function(hir_func).unwrap();
+        assert_eq!(
+            count_real_returns(&mir_func.blocks),
+            1,
+            "`return` inside while must keep its Return terminator"
+        );
+    }
+
+    #[test]
+    fn test_return_inside_for_stays_return() {
+        let hir_func = dummy_hir_fn("f", vec![
+            HirStmt::For {
+                var: "i".to_string(),
+                iterable: Box::new(HirExpr::Int(10, dummy_span())),
+                body: HirBlock {
+                    stmts: vec![HirStmt::Return(
+                        Some(Box::new(HirExpr::Int(7, dummy_span()))),
+                        dummy_span(),
+                    )],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            },
+        ]);
+        let mut lowerer = MirLower::new();
+        let mir_func = lowerer.lower_function(hir_func).unwrap();
+        assert_eq!(
+            count_real_returns(&mir_func.blocks),
+            1,
+            "`return` inside for must keep its Return terminator"
+        );
+        // Latch block must exist and jump back to cond
+        let latch = mir_func.blocks.iter().find(|b| b.name == "for_latch_i");
+        assert!(latch.is_some(), "for loop must have a latch block");
+    }
+
+    #[test]
+    fn test_return_inside_loop_stays_return() {
+        let hir_func = dummy_hir_fn("f", vec![
+            HirStmt::Loop {
+                body: HirBlock {
+                    stmts: vec![HirStmt::Return(
+                        Some(Box::new(HirExpr::Int(9, dummy_span()))),
+                        dummy_span(),
+                    )],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            },
+        ]);
+        let mut lowerer = MirLower::new();
+        let mir_func = lowerer.lower_function(hir_func).unwrap();
+        assert_eq!(
+            count_real_returns(&mir_func.blocks),
+            1,
+            "`return` inside loop must keep its Return terminator"
+        );
+    }
+
+    // --- Regression test: BUG-K02 (if-expression mid-function must not hijack flow) ---
+
+    // --- Regression tests: BUG-K03 (match must compare, not always arm 0) ---
+
+    fn match_hir_fn(arms: Vec<HirPattern>) -> HirFunction {
+        let bodies = vec![
+            HirExpr::Int(10, dummy_span()),
+            HirExpr::Int(20, dummy_span()),
+            HirExpr::Int(30, dummy_span()),
+        ];
+        let matched: Vec<(HirPattern, HirExpr)> = arms.into_iter().zip(bodies).collect();
+        dummy_hir_fn("f", vec![
+            HirStmt::Return(
+                Some(Box::new(HirExpr::Match {
+                    expr: Box::new(HirExpr::Ident("x".to_string(), dummy_span())),
+                    arms: matched,
+                    span: dummy_span(),
+                })),
+                dummy_span(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn test_match_literal_chain_structure() {
+        let hir_func = dummy_hir_fn("f", vec![
+            HirStmt::Return(
+                Some(Box::new(HirExpr::Match {
+                    expr: Box::new(HirExpr::Ident("x".to_string(), dummy_span())),
+                    arms: vec![
+                        (HirPattern::Literal(brak_ir_hir::hir::HirLiteral::Int(1)), HirExpr::Int(10, dummy_span())),
+                        (HirPattern::Literal(brak_ir_hir::hir::HirLiteral::Int(2)), HirExpr::Int(20, dummy_span())),
+                        (HirPattern::Wildcard, HirExpr::Int(30, dummy_span())),
+                    ],
+                    span: dummy_span(),
+                })),
+                dummy_span(),
+            ),
+        ]);
+        let mut lowerer = MirLower::new();
+        // bind scrutinee param
+        lowerer.get_or_create_local("x", MirType::I32);
+        let f = lowerer.lower_function(hir_func).unwrap();
+        // Must contain comparison blocks against each literal, not just fall to arm 0.
+        let eq_count = f.blocks.iter()
+            .map(|b| b.insts.iter().filter(|i| matches!(i,
+                MirInst::Assign { value: MirValue::BinOp { op: MirBinOp::Eq, .. }, .. }
+            )).count())
+            .sum::<usize>();
+        assert_eq!(eq_count, 2, "two literal patterns need two Eq checks, got {eq_count}");
+        // No block may terminate Return except the final one (BUG-K02 family).
+        let rets: usize = f.blocks.iter().filter(|b|
+            matches!(b.terminator, MirTerminator::Return { .. })).count();
+        assert_eq!(rets, 1, "match expression must not inject returns");
+    }
+
+    #[test]
+    fn test_match_wildcard_stops_chain() {
+        let hir_func = match_hir_fn(vec![
+            HirPattern::Binding("v".to_string()),
+            HirPattern::Wildcard,
+        ]);
+        let mut lowerer = MirLower::new();
+        lowerer.get_or_create_local("x", MirType::I32);
+        let f = lowerer.lower_function(hir_func).unwrap();
+        // Binding arm catches everything: no Eq checks at all.
+        let eq_count = f.blocks.iter()
+            .map(|b| b.insts.iter().filter(|i| matches!(i,
+                MirInst::Assign { value: MirValue::BinOp { op: MirBinOp::Eq, .. }, .. }
+            )).count())
+            .sum::<usize>();
+        assert_eq!(eq_count, 0);
+        assert!(f.locals.iter().any(|l| l.name == "v"), "binding pattern creates local");
+    }
+
+    #[test]
+    fn test_if_expr_mid_function_does_not_terminate() {
+        let hir_func = dummy_hir_fn("f", vec![
+            HirStmt::Let {
+                name: "y".to_string(),
+                ty: HirType::I32,
+                value: Some(Box::new(HirExpr::If {
+                    cond: Box::new(HirExpr::Bool(true, dummy_span())),
+                    then: Box::new(HirExpr::Int(1, dummy_span())),
+                    else_: Box::new(HirExpr::Int(0, dummy_span())),
+                    span: dummy_span(),
+                })),
+                span: dummy_span(),
+            },
+            HirStmt::Return(
+                Some(Box::new(HirExpr::Ident("y".to_string(), dummy_span()))),
+                dummy_span(),
+            ),
+        ]);
+        let mut lowerer = MirLower::new();
+        let mir_func = lowerer.lower_function(hir_func).unwrap();
+        // The merge block must NOT terminate with Return — only the final
+        // explicit `return y` may.
+        assert_eq!(
+            count_real_returns(&mir_func.blocks),
+            1,
+            "mid-function if-expression must not inject a synthetic function return"
+        );
+        let last = mir_func.blocks.last().unwrap();
+        assert!(
+            matches!(last.terminator, MirTerminator::Return { .. }),
+            "function must end with the explicit return"
+        );
     }
 }
+
+
+

@@ -16,6 +16,7 @@ use brak_ir_lir::lir::LirProgram;
 use brak_ir_lir::lower::LirLower;
 use brak_link_traits::{LinkerBackend, ObjectFile};
 use brak_link_native::NativeLinker;
+use brak_link_archive;
 use brak_opt_traits::PassManager;
 use brak_opt_dce::DeadCodeElimination;
 use brak_opt_cp::ConstantPropagation;
@@ -244,12 +245,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for file in &files {
                 let path = std::path::Path::new(file);
                 let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                
+
+                // BUG-H03: archive inputs (.a/.lib) are now unpacked into their
+                // member objects; the raw archive bytes used to be fed straight
+                // to the ELF/COFF parser, which always failed.
+                if ext == "a" || ext == "lib" {
+                    let bytes = std::fs::read(file)?;
+                    let members = brak_link_archive::parse_archive(&bytes)?;
+                    if members.is_empty() {
+                        return Err(format!("archive '{file}' contains no object members").into());
+                    }
+                    for m in members {
+                        objects.push(ObjectFile { name: m.name, data: m.data });
+                    }
+                    continue;
+                }
+
                 let (name, data) = match ext {
                     "o" | "obj" => {
-                        (path.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(file)?)
-                    }
-                    "a" | "lib" => {
                         (path.file_name().unwrap().to_string_lossy().to_string(), std::fs::read(file)?)
                     }
                     "lit" => {
@@ -273,7 +286,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pm.add_pass(Box::new(ConstantPropagation));
                         pm.add_pass(Box::new(Inlining));
                         pm.add_pass(Box::new(GlobalValueNumbering));
-                        pm.add_pass(Box::new(DeadCodeElimination));
+                        // BUG-M10: DCE assumes entry == "main"; for --shared
+                        // builds there is no main and public fns must survive.
+                        if !shared {
+                            pm.add_pass(Box::new(DeadCodeElimination));
+                        }
                         pm.add_pass(Box::new(JumpThreading));
                         pm.add_pass(Box::new(TailCallOptimization));
                         
@@ -282,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let backend = brak_codegen_obj::ObjBackend::default();
                         let obj_bytes = backend.emit(&lir)?;
                         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                        lib_name = stem.clone();
+                        if lib_name.is_empty() { lib_name = stem.clone(); } // BUG-L04: first input wins
                         (stem + ".o", obj_bytes)
                     }
                     _ => {
@@ -326,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !skip_passes.contains("tco") {
                             pm.add_pass(Box::new(TailCallOptimization));
                         }
-                        if !skip_passes.contains("dce") {
+                        if !skip_passes.contains("dce") && !shared {
                             pm.add_pass(Box::new(DeadCodeElimination));
                         }
 
@@ -338,7 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let backend = brak_codegen_obj::ObjBackend::default();
                         let obj_bytes = backend.emit(&lir)?;
                         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-                        lib_name = stem.clone();
+                        if lib_name.is_empty() { lib_name = stem.clone(); } // BUG-L04: first input wins
                         (stem + ".o", obj_bytes)
                     }
                 };
@@ -353,11 +370,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if shared {
-                let out_path = output.clone().unwrap_or_else(|| format!("lib{}.so", lib_name));
+                // BUG-H02: real PE shared library (DLL characteristic + export
+                // directory), not a mislabeled executable.
+                let out_path = output.clone().unwrap_or_else(|| {
+                    if cfg!(target_os = "windows") { format!("{}.dll", lib_name) }
+                    else { format!("lib{}.so", lib_name) }
+                });
+                let base_addr = if cfg!(target_os = "windows") { 0x180000000 } else { 0x400000 };
                 let linker = NativeLinker;
-                let base_addr = if cfg!(target_os = "windows") { 0x140000000 } else { 0x400000 };
-                let output_exec = linker.link(&objects, &entry, base_addr)?;
-                std::fs::write(&out_path, &output_exec.data)?;
+                let output_lib = linker.link_shared(&objects, base_addr)?;
+                std::fs::write(&out_path, &output_lib.data)?;
                 println!("Built shared library: {out_path}");
             }
 
@@ -451,3 +473,4 @@ cc = "1"
 
     Ok(())
 }
+

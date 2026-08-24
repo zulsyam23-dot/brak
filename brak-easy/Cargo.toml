@@ -22,11 +22,3 @@ brak-codegen-obj = { path = "../brak-codegen-obj" }
 brak-link-traits = { path = "../brak-link-traits" }
 brak-link-native = { path = "../brak-link-native" }
 serde = { version = "1.0", features = ["derive"] }
-
-[[example]]
-name = "ijat_compiler"
-path = "../samples/ijat_compiler.rs"
-
-[[example]]
-name = "easy_compiler"
-path = "../samples/easy_compiler.rs"

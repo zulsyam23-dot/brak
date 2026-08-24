@@ -335,6 +335,11 @@ impl CWriter {
             LirOpcode::Sub => self.emit_binop("-", inst),
             LirOpcode::Mul => self.emit_binop("*", inst),
             LirOpcode::Div => self.emit_binop("/", inst),
+            // BUG-M17: dedicated float arithmetic.
+            LirOpcode::FAdd => self.emit_binop("+", inst),
+            LirOpcode::FSub => self.emit_binop("-", inst),
+            LirOpcode::FMul => self.emit_binop("*", inst),
+            LirOpcode::FDiv => self.emit_binop("/", inst),
             LirOpcode::Mod => self.emit_binop("%", inst),
             LirOpcode::Neg => self.emit_unop("-", inst),
             LirOpcode::Not => self.emit_unop("!", inst),

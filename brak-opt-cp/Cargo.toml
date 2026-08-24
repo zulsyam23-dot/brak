@@ -7,3 +7,4 @@ edition = "2021"
 brak-core = { path = "../brak-core" }
 brak-ir-lir = { path = "../brak-ir-lir" }
 brak-opt-traits = { path = "../brak-opt-traits" }
+brak-opt-utils = { path = "../brak-opt-utils" }

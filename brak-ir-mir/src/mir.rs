@@ -132,6 +132,9 @@ pub enum MirValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MirBinOp {
     Add, Sub, Mul, Div, Mod,
+    // BUG-M17: dedicated float ops — backends can no longer misinterpret
+    // float arithmetic as integer (the old ImmF64 heuristic was unreliable).
+    FAdd, FSub, FMul, FDiv,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
     BitAnd, BitOr, BitXor, Shl, Shr,
@@ -348,6 +351,8 @@ impl std::fmt::Display for MirBinOp {
             MirBinOp::Add => write!(f, "+"), MirBinOp::Sub => write!(f, "-"),
             MirBinOp::Mul => write!(f, "*"), MirBinOp::Div => write!(f, "/"),
             MirBinOp::Mod => write!(f, "%"),
+            MirBinOp::FAdd => write!(f, "+."), MirBinOp::FSub => write!(f, "-."),
+            MirBinOp::FMul => write!(f, "*."), MirBinOp::FDiv => write!(f, "/."),
             MirBinOp::Eq => write!(f, "=="), MirBinOp::Ne => write!(f, "!="),
             MirBinOp::Lt => write!(f, "<"), MirBinOp::Le => write!(f, "<="),
             MirBinOp::Gt => write!(f, ">"), MirBinOp::Ge => write!(f, ">="),

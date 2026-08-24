@@ -85,12 +85,29 @@ fn remove_dead_instructions(func: &mut LirFunction) {
     }
 }
 
-/// Cari successor blocks: kemana Jmp/Br menunjuk
+/// Cari successor blocks: kemana Jmp/Br menunjuk.
+/// Returns successors keyed by VEC INDEX (not block id) so downstream
+/// liveness dataflow (which enumerates blocks) stays consistent.
 fn compute_successors(func: &LirFunction) -> HashMap<usize, Vec<usize>> {
     let mut succ: HashMap<usize, Vec<usize>> = HashMap::new();
+    // LIR branch labels are "block_{id}"; block names are arbitrary
+    // ("entry", "while_cond", ...). Resolve by id first, name second.
+    let block_ids: HashSet<usize> = func.blocks.iter().map(|b| b.id).collect();
     let block_map: HashMap<String, usize> = func.blocks.iter()
         .map(|b| (b.name.clone(), b.id))
         .collect();
+    // id -> vec index mapping (BUG-K06 family: ids and indices diverge after
+    // inlining/optimization; mixing them silently corrupts liveness)
+    let id_to_idx: HashMap<usize, usize> =
+        func.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    let resolve = |name: &str| -> Option<usize> {
+        let target_id = if let Some(id) = name.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+            if block_ids.contains(&id) { Some(id) } else { None }
+        } else {
+            block_map.get(name).copied()
+        }?;
+        id_to_idx.get(&target_id).copied()
+    };
 
     for (bi, block) in func.blocks.iter().enumerate() {
         let edges = &mut succ.entry(bi).or_default();
@@ -98,7 +115,7 @@ fn compute_successors(func: &LirFunction) -> HashMap<usize, Vec<usize>> {
             match inst.opcode {
                 LirOpcode::Jmp => {
                     if let Some(LirOperand::Label(name)) = inst.operands.first() {
-                        if let Some(&target) = block_map.get(name) {
+                        if let Some(target) = resolve(name) {
                             edges.push(target);
                         }
                     }
@@ -106,7 +123,7 @@ fn compute_successors(func: &LirFunction) -> HashMap<usize, Vec<usize>> {
                 LirOpcode::Br => {
                     for op in &inst.operands {
                         if let LirOperand::Label(name) = op {
-                            if let Some(&target) = block_map.get(name) {
+                            if let Some(target) = resolve(name) {
                                 edges.push(target);
                             }
                         }
@@ -115,8 +132,12 @@ fn compute_successors(func: &LirFunction) -> HashMap<usize, Vec<usize>> {
                 _ => {}
             }
         }
-        // If no terminator, next block is successor (fall-through)
-        if edges.is_empty() && bi + 1 < func.blocks.len() {
+        // If no terminator (and not an explicit Return), next block is
+        // the fall-through successor.
+        if edges.is_empty()
+            && !block.insts.iter().any(|i| i.opcode == LirOpcode::Ret)
+            && bi + 1 < func.blocks.len()
+        {
             edges.push(bi + 1);
         }
     }
@@ -175,6 +196,8 @@ fn compute_live_out(func: &LirFunction, successors: &HashMap<usize, Vec<usize>>)
 }
 
 /// Apakah instruksi punya side effect (tidak bisa dihapus walau dest-nya dead)?
+/// BUG-M10: `Div`/`Mod` ditambahkan — trap-nya (divide-by-zero) observable,
+/// menghapusnya mengubah semantik program.
 fn has_side_effect(inst: &LirInst) -> bool {
     matches!(inst.opcode,
         LirOpcode::Call
@@ -185,6 +208,8 @@ fn has_side_effect(inst: &LirInst) -> bool {
         | LirOpcode::Push
         | LirOpcode::Pop
         | LirOpcode::Comment
+        | LirOpcode::Div
+        | LirOpcode::Mod
     )
 }
 

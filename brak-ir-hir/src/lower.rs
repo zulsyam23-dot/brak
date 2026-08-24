@@ -187,9 +187,15 @@ impl HirLower {
         match stmt {
             ast::Stmt::Let(l) => {
                 let value = l.value.map(|v| Box::new(self.lower_expr(*v)));
+                // BUG-M17: an unannotated `let` used to default to I32 even for
+                // float/string/bool values. Infer the declared type from the
+                // initializer when the annotation is absent.
+                let ty = l.ty.map(lower_type).unwrap_or_else(|| {
+                        infer_init_type(value.as_deref())
+                });
                 HirStmt::Let {
                     name: l.name.name,
-                    ty: l.ty.map(lower_type).unwrap_or(HirType::I32),
+                    ty,
                     value,
                     span: l.span,
                 }
@@ -272,7 +278,8 @@ impl HirLower {
             ast::Expr::Block(b) => HirExpr::Block(self.lower_block(b)),
             ast::Expr::Match { expr, arms, span } => {
                 let lowered_arms = arms.into_iter().map(|arm| {
-                    let pat = self.lower_expr(ast::Expr::String(arm.pattern.to_string(), arm.span));
+                    // BUG-K03: patterns were flattened to strings, losing structure.
+                    let pat = lower_pattern(arm.pattern);
                     let body = self.lower_expr(arm.body);
                     (pat, body)
                 }).collect();
@@ -293,6 +300,43 @@ impl HirLower {
                 span,
             },
         }
+    }
+}
+
+/// Infer a `let`'s type from its initializer (annotation absent).
+/// Float binop variants (FAdd/FSub/FMul/FDiv) are already resolved by the
+/// time expressions reach HIR-lowering output... actually they are chosen at
+/// MIR level; here we detect float-ness structurally.
+fn infer_init_type(v: Option<&HirExpr>) -> HirType {
+    match v {
+        Some(HirExpr::Float(..)) => HirType::F64,
+        Some(HirExpr::Int(..)) => HirType::I32,
+        Some(HirExpr::Bool(..)) => HirType::Bool,
+        Some(HirExpr::String(..)) => HirType::String,
+        // A BinOp whose operand chain bottoms out in a Float literal is float.
+        Some(HirExpr::BinOp { lhs, .. }) => infer_init_type(Some(lhs)),
+        _ => HirType::I32,
+    }
+}
+
+fn lower_pattern(p: ast::Pattern) -> HirPattern {    match p {
+        ast::Pattern::Wildcard(_) => HirPattern::Wildcard,
+        ast::Pattern::Ident(id) => {
+            // `_` parses as Ident too — normalize it to Wildcard
+            if id.name == "_" { HirPattern::Wildcard } else { HirPattern::Binding(id.name) }
+        }
+        ast::Pattern::Literal(e) => HirPattern::Literal(lower_literal_pattern(e)),
+    }
+}
+
+/// Literal patterns must stay literal (no arbitrary expression evaluation).
+fn lower_literal_pattern(e: ast::Expr) -> HirLiteral {
+    match e {
+        ast::Expr::Int(i, _) => HirLiteral::Int(i),
+        ast::Expr::Float(f, _) => HirLiteral::Float(f),
+        ast::Expr::Bool(b, _) => HirLiteral::Bool(b),
+        ast::Expr::String(s, _) => HirLiteral::Str(s),
+        other => HirLiteral::Str(other.to_string()),
     }
 }
 
@@ -1029,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lower_unsupported_item_errors() {
+    fn test_lower_struct_item_supported() {
         use ast::Item;
         let ast = ast::Program {
             items: vec![
@@ -1040,6 +1084,6 @@ mod tests {
         };
         let lowerer = HirLower::new();
         let result = lowerer.lower(ast);
-        assert!(result.is_err(), "struct lowering should error");
+        assert!(result.is_ok(), "struct lowering is supported since Phase 9");
     }
 }

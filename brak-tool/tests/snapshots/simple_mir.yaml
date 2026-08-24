@@ -4,7 +4,7 @@ functions:
   ret_ty: Void
   blocks:
   - id: 0
-    name: entry
+    name: unreachable
     insts:
     - !Assign
       dest: 1
@@ -95,3 +95,6 @@ functions:
       line: 1
       column: 3
       offset: 2
+extern_functions: []
+structs: []
+enums: []

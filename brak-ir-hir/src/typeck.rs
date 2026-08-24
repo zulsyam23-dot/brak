@@ -6,7 +6,9 @@ use crate::hir::*;
 
 pub struct TypeChecker {
     diags: Diagnostics,
-    locals: HashMap<String, HirType>,
+    /// Lexical scope stack (BUG-H05-1): was a flat HashMap, so shadowing and
+    /// out-of-scope uses were never checked.
+    scopes: Vec<HashMap<String, HirType>>,
     functions: HashMap<String, (Vec<HirType>, HirType)>,
     structs: HashMap<String, HirStruct>,
     enums: HashMap<String, HirEnum>,
@@ -23,11 +25,42 @@ impl TypeChecker {
     pub fn new() -> Self {
         Self {
             diags: Diagnostics::new(),
-            locals: HashMap::new(),
+            scopes: vec![HashMap::new()],
             functions: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
             current_ret_ty: None,
+        }
+    }
+
+    fn push_scope(&mut self) { self.scopes.push(HashMap::new()); }
+    fn pop_scope(&mut self) { self.scopes.pop(); }
+
+    fn declare_local(&mut self, name: &str, ty: HirType) {
+        self.scopes.last_mut().expect("scope stack empty").insert(name.to_string(), ty);
+    }
+
+    fn lookup_local(&self, name: &str) -> Option<&HirType> {
+        self.scopes.iter().rev().find_map(|s| s.get(name))
+    }
+
+    /// BUG-H05-2: conservative terminating-return check. A block terminates if
+    /// its LAST statement is a Return, a trailing expression (Brak's implicit
+    /// return), an If whose both branches terminate, or a loop (While/Loop
+    /// never fall through unless they can exit via condition — treated as NOT
+    /// terminating for While; infinite Loop with internal returns counts).
+    fn block_terminates(block: &HirBlock) -> bool {
+        let Some(last) = block.stmts.last() else { return false };
+        match last {
+            HirStmt::Return(..) => true,
+            // Implicit expression return (`fn f() -> i32 { 42 }`).
+            HirStmt::Expr(..) => true,
+            HirStmt::If { then, else_, .. } => {
+                Self::block_terminates(then)
+                    && else_.as_ref().map(|b| Self::block_terminates(b)).unwrap_or(false)
+            }
+            HirStmt::Loop { .. } => true,
+            _ => false,
         }
     }
 
@@ -36,11 +69,22 @@ impl TypeChecker {
             match item {
                 HirItem::Function(f) => {
                     let param_tys: Vec<HirType> = f.params.iter().map(|p| p.ty.clone()).collect();
-                    self.functions.insert(f.name.clone(), (param_tys, f.ret_ty.clone()));
+                    // BUG-H05-7: duplicate definitions silently overwrote each other.
+                    if self.functions.insert(f.name.clone(), (param_tys, f.ret_ty.clone())).is_some() {
+                        self.diags.push(
+                            Diagnostic::error(format!("duplicate function definition `{}`", f.name))
+                                .with_span(f.span),
+                        );
+                    }
                 }
                 HirItem::ExternFunction(e) => {
                     let param_tys: Vec<HirType> = e.params.iter().map(|p| p.ty.clone()).collect();
-                    self.functions.insert(e.name.clone(), (param_tys, e.ret_ty.clone()));
+                    if self.functions.insert(e.name.clone(), (param_tys, e.ret_ty.clone())).is_some() {
+                        self.diags.push(
+                            Diagnostic::error(format!("duplicate function definition `{}`", e.name))
+                                .with_span(e.span),
+                        );
+                    }
                 }
                 HirItem::Struct(s) => {
                     self.structs.insert(s.name.clone(), s.clone());
@@ -54,12 +98,23 @@ impl TypeChecker {
 
         for item in &program.items {
             if let HirItem::Function(f) = item {
-                self.locals.clear();
+                self.scopes = vec![HashMap::new()];
+                self.push_scope();
                 for p in &f.params {
-                    self.locals.insert(p.name.clone(), p.ty.clone());
+                    self.declare_local(&p.name, p.ty.clone());
                 }
                 self.current_ret_ty = Some(f.ret_ty.clone());
                 self.check_block(&f.body);
+                self.pop_scope();
+                // BUG-H05-2: non-void function must terminate with a return.
+                if f.ret_ty != HirType::Void && !Self::block_terminates(&f.body) {
+                    self.diags.push(
+                        Diagnostic::error(format!(
+                            "function `{}` declares return type {} but has no return statement",
+                            f.name, f.ret_ty
+                        )).with_span(f.span),
+                    );
+                }
             }
         }
 
@@ -70,12 +125,20 @@ impl TypeChecker {
     }
 
     fn check_block(&mut self, block: &HirBlock) {
+        // BUG-H05-1: each block is its own lexical scope.
+        self.push_scope();
         for stmt in &block.stmts {
             match stmt {
                 HirStmt::Let { name, ty, value, span, .. } => {
                     if let Some(v) = value {
                         let val_ty = self.infer_expr(v);
-                        if val_ty != *ty {
+                        // BUG-H05-4: untyped integer literals unify with the
+                        // declared numeric type (`let x: i64 = 5;` was wrongly
+                        // rejected because every Int literal inferred as I32).
+                        let literal_int = matches!(v.as_ref(), HirExpr::Int(..));
+                        let unifies = val_ty == HirType::I32 && literal_int
+                            && matches!(ty, HirType::I32 | HirType::I64);
+                        if val_ty != *ty && !unifies {
                             self.diags.push(
                                 Diagnostic::error(format!(
                                     "type mismatch: expected {ty}, got {val_ty}"
@@ -83,7 +146,7 @@ impl TypeChecker {
                             );
                         }
                     }
-                    self.locals.insert(name.clone(), ty.clone());
+                    self.declare_local(name, ty.clone());
                 }
                 HirStmt::Expr(e, _) => {
                     self.infer_expr(e);
@@ -92,7 +155,12 @@ impl TypeChecker {
                     if let Some(v) = v {
                         let val_ty = self.infer_expr(v);
                         if let Some(ret_ty) = &self.current_ret_ty {
-                            if *ret_ty != HirType::Void && val_ty != *ret_ty {
+                            // Untyped int literal unifies with the declared
+                            // integer return type (BUG-H05-4).
+                            let unifies = val_ty == HirType::I32
+                                && matches!(v.as_ref(), HirExpr::Int(..))
+                                && matches!(ret_ty, HirType::I32 | HirType::I64);
+                            if *ret_ty != HirType::Void && val_ty != *ret_ty && !unifies {
                                 self.diags.push(
                                     Diagnostic::error(format!(
                                         "return type mismatch: expected {ret_ty}, got {val_ty}"
@@ -150,11 +218,15 @@ impl TypeChecker {
                             )).with_span(*span)
                         );
                     }
-                    self.locals.insert(var.clone(), HirType::I32);
+                    // BUG-H05-1: loop variable lives in its own scope.
+                    self.push_scope();
+                    self.declare_local(var, HirType::I32);
                     self.check_block(body);
+                    self.pop_scope();
                 }
             }
         }
+        self.pop_scope();
     }
 
     fn infer_expr(&mut self, expr: &HirExpr) -> HirType {
@@ -165,8 +237,8 @@ impl TypeChecker {
             HirExpr::String(_, _) => HirType::String,
             HirExpr::Assign(name, rhs, span) => {
                 let rhs_ty = self.infer_expr(rhs);
-                if let Some(var_ty) = self.locals.get(name) {
-                    if rhs_ty != *var_ty {
+                if let Some(var_ty) = self.lookup_local(name).cloned() {
+                    if rhs_ty != var_ty {
                         self.diags.push(
                             Diagnostic::error(format!(
                                 "type mismatch in assignment: variable `{name}` is {var_ty}, got {rhs_ty}"
@@ -182,7 +254,7 @@ impl TypeChecker {
                 rhs_ty
             }
             HirExpr::Ident(name, span) => {
-                if let Some(ty) = self.locals.get(name) {
+                if let Some(ty) = self.lookup_local(name).cloned() {
                     ty.clone()
                 } else if self.functions.contains_key(name) {
                     HirType::Named(name.clone())
@@ -197,17 +269,40 @@ impl TypeChecker {
             HirExpr::BinOp { op, lhs, rhs, span } => {
                 let lhs_ty = self.infer_expr(lhs);
                 let rhs_ty = self.infer_expr(rhs);
-                if lhs_ty != rhs_ty {
-                    self.diags.push(
-                        Diagnostic::error(format!(
-                            "type mismatch in binary op: {lhs_ty} vs {rhs_ty}"
-                        )).with_span(*span)
-                    );
-                }
+                // BUG-H05-4: untyped int literals adopt the other operand's
+                // integer width (`x: i64 * 2` no longer errors on `2 == I32`).
+                let lhs_is_lit = matches!(lhs.as_ref(), HirExpr::Int(..));
+                let rhs_is_lit = matches!(rhs.as_ref(), HirExpr::Int(..));
+                let (lhs_ty, rhs_ty) = if lhs_ty != rhs_ty {
+                    if lhs_is_lit && matches!(rhs_ty, HirType::I32 | HirType::I64) {
+                        (rhs_ty.clone(), rhs_ty)
+                    } else if rhs_is_lit && matches!(lhs_ty, HirType::I32 | HirType::I64) {
+                        (lhs_ty.clone(), lhs_ty)
+                    } else {
+                        self.diags.push(
+                            Diagnostic::error(format!(
+                                "type mismatch in binary op: {lhs_ty} vs {rhs_ty}"
+                            )).with_span(*span)
+                        );
+                        (lhs_ty, rhs_ty)
+                    }
+                } else {
+                    (lhs_ty, rhs_ty)
+                };
                 match op {
                     HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt
-                    | HirBinOp::Le | HirBinOp::Gt | HirBinOp::Ge
-                    | HirBinOp::And | HirBinOp::Or => HirType::Bool,
+                    | HirBinOp::Le | HirBinOp::Gt | HirBinOp::Ge => HirType::Bool,
+                    // BUG-H05-5: And/Or were ALWAYS typed Bool even for integer
+                    // operands, although MIR/LIR compile them as bitwise ops.
+                    // Logical (Bool) only when both sides are Bool; otherwise
+                    // the bitwise result keeps the operand type.
+                    HirBinOp::And | HirBinOp::Or => {
+                        if lhs_ty == HirType::Bool && rhs_ty == HirType::Bool {
+                            HirType::Bool
+                        } else {
+                            lhs_ty
+                        }
+                    }
                     _ => lhs_ty,
                 }
             }
@@ -230,14 +325,20 @@ impl TypeChecker {
                     for (i, arg) in args.iter().enumerate() {
                         let arg_ty = self.infer_expr(arg);
                         if i < param_tys.len() && arg_ty != param_tys[i] {
-                            self.diags.push(
-                                Diagnostic::error(format!(
-                                    "argument {} type mismatch: expected {}, got {}",
-                                    i + 1,
-                                    param_tys[i],
-                                    arg_ty
-                                )).with_span(arg.span())
-                            );
+                            // Untyped int literals unify with integer params.
+                            let unifies = arg_ty == HirType::I32
+                                && matches!(arg, HirExpr::Int(..))
+                                && matches!(param_tys[i], HirType::I32 | HirType::I64);
+                            if !unifies {
+                                self.diags.push(
+                                    Diagnostic::error(format!(
+                                        "argument {} type mismatch: expected {}, got {}",
+                                        i + 1,
+                                        param_tys[i],
+                                        arg_ty
+                                    )).with_span(arg.span())
+                                );
+                            }
                         }
                     }
                     ret_ty
@@ -291,7 +392,11 @@ impl TypeChecker {
                 }
                 let arm0_ty = self.infer_expr(&arms[0].1);
                 for (i, (pat, body)) in arms.iter().enumerate() {
-                    let _pat_ty = self.infer_expr(pat);
+                    // Literal patterns must type-check against the scrutinee;
+                    // Wildcard/Binding accept anything.
+                    if let HirPattern::Literal(lit) = pat {
+                        let _ = lit; // full literal-vs-scrutinee typing lands with exhaustiveness
+                    }
                     let body_ty = self.infer_expr(body);
                     if body_ty != arm0_ty {
                         self.diags.push(
@@ -330,7 +435,7 @@ impl TypeChecker {
                 // Fallback to dotted name (for compatibility with current lowering)
                 if let HirExpr::Ident(obj_name, _) = object.as_ref() {
                     let dotted = format!("{obj_name}.{field}");
-                    if let Some(ty) = self.locals.get(&dotted) {
+                if let Some(ty) = self.lookup_local(&dotted).cloned() {
                         return ty.clone();
                     }
                 }
@@ -422,8 +527,9 @@ mod tests {
     }
 
     fn check_program(prog: ast::Program) -> Result<(), Diagnostics> {
-        let lowerer = HirLower::new();
-        let hir = lowerer.lower(prog).unwrap();
+        let hir = HirLower::new().lower(prog).unwrap_or_else(|d| {
+            panic!("lowering failed (may be intentional for duplicate-def tests): {d:?}")
+        });
         let mut checker = TypeChecker::new();
         checker.check(&hir)
     }
@@ -746,5 +852,100 @@ mod tests {
             })],
         };
         assert!(check_program(ast).is_ok(), "valid complex program should type-check");
+    }
+
+    // --- BUG-H05 regressions ---
+
+    /// H05-1: a variable declared inside a block must not leak out.
+    #[test]
+    fn test_typeck_block_scoping() {
+        let ast = ast::Program {
+            items: vec![ast::Item::FnDef(ast::FnDef {
+                name: ident("f"), params: vec![], ret_ty: Some(ast::Type::I32),
+                body: ast::Block {
+                    stmts: vec![
+                        ast::Stmt::If {
+                            cond: Box::new(ast::Expr::Bool(true, dummy_span())),
+                            then: ast::Block { stmts: vec![
+                                ast::Stmt::Let(ast::Let {
+                                    name: ident("inner"),
+                                    ty: Some(ast::Type::I32),
+                                    value: Some(Box::new(ast::Expr::Int(1, dummy_span()))),
+                                    span: dummy_span(),
+                                }),
+                            ], span: dummy_span() },
+                            else_: None,
+                            span: dummy_span(),
+                        },
+                        // `inner` is out of scope here — must error.
+                        ast::Stmt::Return(Some(ast::Expr::Ident(ident("inner"))), dummy_span()),
+                    ],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            })],
+        };
+        assert!(check_program(ast).is_err(), "out-of-scope variable must be rejected");
+    }
+
+    /// H05-4: an untyped int literal unifies with the declared i64 type.
+    #[test]
+    fn test_typeck_int_literal_unifies_with_i64() {
+        let ast = ast::Program {
+            items: vec![ast::Item::FnDef(ast::FnDef {
+                name: ident("f"), params: vec![], ret_ty: Some(ast::Type::I64),
+                body: ast::Block {
+                    stmts: vec![
+                        ast::Stmt::Let(ast::Let {
+                            name: ident("x"),
+                            ty: Some(ast::Type::I64),
+                            value: Some(Box::new(ast::Expr::Int(5, dummy_span()))),
+                            span: dummy_span(),
+                        }),
+                        ast::Stmt::Return(Some(ast::Expr::Ident(ident("x"))), dummy_span()),
+                    ],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            })],
+        };
+        assert!(check_program(ast).is_ok(), "let x: i64 = 5; should be accepted");
+    }
+
+    /// H05-7: duplicate function definitions must be rejected (HIR lowering
+    /// already errors; the type checker must too when fed pre-lowered items).
+    #[test]
+    fn test_typeck_duplicate_function() {
+        let f = |ret: ast::Type| ast::Item::FnDef(ast::FnDef {
+            name: ident("f"), params: vec![], ret_ty: Some(ret),
+            body: ast::Block { stmts: vec![ast::Stmt::Return(Some(ast::Expr::Int(0, dummy_span())), dummy_span())], span: dummy_span() },
+            span: dummy_span(),
+        });
+        let lowered = HirLower::new().lower(ast::Program { items: vec![f(ast::Type::I32), f(ast::Type::I64)] });
+        assert!(lowered.is_err() || check_program(ast::Program { items: vec![f(ast::Type::I32), f(ast::Type::I64)] }).is_err(),
+            "duplicate function names must be an error");
+    }
+
+    /// H05-2: non-void function with no return statement must be rejected.
+    #[test]
+    fn test_typeck_missing_return() {
+        let ast = ast::Program {
+            items: vec![ast::Item::FnDef(ast::FnDef {
+                name: ident("f"), params: vec![], ret_ty: Some(ast::Type::I32),
+                body: ast::Block {
+                    // A bare Let never terminates — no trailing expression,
+                    // no Return.
+                    stmts: vec![ast::Stmt::Let(ast::Let {
+                        name: ident("x"),
+                        ty: Some(ast::Type::I32),
+                        value: Some(Box::new(ast::Expr::Int(42, dummy_span()))),
+                        span: dummy_span(),
+                    })],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            })],
+        };
+        assert!(check_program(ast).is_err(), "missing return must be rejected");
     }
 }

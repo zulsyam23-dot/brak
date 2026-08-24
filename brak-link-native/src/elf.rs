@@ -14,7 +14,7 @@ pub fn link_elf(objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<L
     let (merged_text, text_bases) = merge_text(&parsed);
     let merged_text = apply_all_relocs(&parsed, &global_syms, &merged_text, &text_bases, base_addr, 64 + 56)?;
 
-    let entry_offset = find_entry_offset(&parsed, &global_syms, &text_bases, entry);
+    let entry_offset = find_entry_offset(&parsed, &global_syms, &text_bases, entry)?;
     let start_stub = build_start_stub(entry_offset);
     let mut full_text = start_stub;
     full_text.extend_from_slice(&merged_text);
@@ -162,7 +162,15 @@ fn build_start_stub(entry_offset_in_text: u64) -> Vec<u8> {
     stub
 }
 
-fn write_name(buf: &mut Vec<u8>, table: &[u8], name: &[u8]) {
-    let offset = table.windows(name.len()).position(|w| w == name).unwrap_or(0) as u32;
+fn write_name(buf: &mut Vec<u8>, table: &[u8], name: &[u8]) -> brak_core::Result<()> {
+    // BUG-L01: a missing strtab name used to silently write offset 0 (the NUL
+    // terminator), corrupting the symbol table entry.
+    let offset = table
+        .windows(name.len())
+        .position(|w| w == name)
+        .ok_or_else(|| format!("name '{}' not found in string table", String::from_utf8_lossy(name)))?
+        as u32;
     write_u32(buf, offset);
+    Ok(())
 }
+

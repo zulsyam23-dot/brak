@@ -31,6 +31,10 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
     let max_id = caller.blocks.iter().map(|b| b.id).max().unwrap_or(0);
     let mut next_id = max_id + 1;
     let mut changed = false;
+    // BUG-K07: blocks that get inlined are renamed to `{name}.pre`, but earlier
+    // passes may have emitted labels pointing at the OLD name (e.g. a previous
+    // inline iteration's `{x}.cont`). Track renames so references stay valid.
+    let mut renames: HashMap<String, String> = HashMap::new();
 
     for block in &caller.blocks {
         let mut found = None;
@@ -40,8 +44,19 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
                     if let Some(callee) = callee_map.get(name) {
                         let total: usize = callee.blocks.iter().map(|b| b.insts.len()).sum();
                         if total < 20 && name != &caller.name {
-                            found = Some((i, callee.clone()));
-                            break;
+                            // BUG (found via TCO work): inlining a DIRECTLY
+                            // recursive callee re-introduces the same call site
+                            // every pass — infinite loop. Leave recursive
+                            // functions alone (TCO optimizes them in place).
+                            let self_recursive = callee.blocks.iter().any(|b|
+                                b.insts.iter().any(|ci|
+                                    ci.opcode == LirOpcode::Call
+                                        && matches!(ci.operands.first(), Some(LirOperand::Label(l)) if l == name)
+                                ));
+                            if !self_recursive {
+                                found = Some((i, callee.clone()));
+                                break;
+                            }
                         }
                     }
                 }
@@ -52,6 +67,7 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
             changed = true;
             let call_inst = &block.insts[call_idx];
             let ro = caller.reg_count;
+            renames.insert(block.name.clone(), format!("{}.pre", block.name));
 
             // Block A: instructions before Call
             let aid = block.id;
@@ -63,6 +79,32 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
             });
 
             let inline_id = format!("f{}.b{}", caller.name, next_id);
+            // LIR branch labels use "block_{id}" (numeric), while block names
+            // are arbitrary ("entry", "unreachable", ...). Rewrite targets by
+            // block id so they always match the generated block names.
+            let id_to_name: HashMap<usize, String> =
+                callee.blocks.iter().map(|b| (b.id, format!("{}_block_{}", inline_id, b.id))).collect();
+            // BUG-K07 (part 2): only labels INTERNAL to the callee get rewritten.
+            // Global symbols referenced by the callee (e.g. `Call count` inside
+            // an inlined caller chain) must keep their original names — the old
+            // blanket rename mangled them into unresolvable symbols.
+            let callee_internal_names: std::collections::HashSet<String> = callee
+                .blocks
+                .iter()
+                .flat_map(|b| {
+                    let mapped = id_to_name.get(&b.id).cloned().into_iter();
+                    mapped.chain(std::iter::once(fmt_label(&inline_id, &b.name)))
+                })
+                .collect();
+            let rewrite_lbl = |l: &str| -> String {
+                if let Some(id) = l.strip_prefix("block_").and_then(|s| s.parse::<usize>().ok()) {
+                    id_to_name.get(&id).cloned().unwrap_or_else(|| l.to_string())
+                } else if callee_internal_names.contains(l) {
+                    fmt_label(&inline_id, l)
+                } else {
+                    l.to_string()
+                }
+            };
 
             // Prelude: parameter Mov + Jmp to callee entry
             let mut prelude = Vec::new();
@@ -71,7 +113,7 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
                     prelude.push(LirInst::new(LirOpcode::Mov).with_dest(pr + ro).with_op(arg.clone()));
                 }
             }
-            let entry_lbl = fmt_label(&inline_id, &callee.blocks[0].name);
+            let entry_lbl = id_to_name.get(&callee.blocks[0].id).cloned().unwrap_or_default();
             prelude.push(LirInst::new(LirOpcode::Jmp).with_op(LirOperand::Label(entry_lbl)));
             let pid = next_id; next_id += 1;
             new_blocks.push(LirBlock {
@@ -81,9 +123,14 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
                 span: block.span,
             });
 
+            // Continuation target name — unique per call site so repeated
+            // inlining of same-named blocks can never collide (BUG-K07).
+            let cid = next_id; next_id += 1;
+            let cont_name = format!("{}_cont{}", block.name, cid);
+
             // Inline callee blocks
             for cb in &callee.blocks {
-                let new_lbl = fmt_label(&inline_id, &cb.name);
+                let new_lbl = id_to_name.get(&cb.id).cloned().unwrap_or_else(|| fmt_label(&inline_id, &cb.name));
                 let mut ci = Vec::new();
                 for inst in &cb.insts {
                     if inst.opcode == LirOpcode::Ret {
@@ -95,7 +142,7 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
                             }
                         }
                         ci.push(LirInst::new(LirOpcode::Jmp)
-                            .with_op(LirOperand::Label(format!("{}.cont", block.name))));
+                            .with_op(LirOperand::Label(cont_name.clone())));
                         continue;
                     }
                     let mut ni = inst.clone();
@@ -103,9 +150,7 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
                     for op in &mut ni.operands {
                         match op {
                             LirOperand::Reg(r) => *r += ro,
-                            LirOperand::Label(l) if !l.starts_with(&inline_id) => {
-                                *l = fmt_label(&inline_id, l);
-                            }
+                            LirOperand::Label(l) => *l = rewrite_lbl(l),
                             _ => {}
                         }
                     }
@@ -117,22 +162,41 @@ fn inline_one_pass(caller: &mut LirFunction, callee_map: &HashMap<String, LirFun
 
             caller.reg_count += callee.reg_count;
 
-            // Continuation block
-            if call_idx + 1 < block.insts.len() {
-                let cid = next_id; next_id += 1;
-                new_blocks.push(LirBlock {
-                    id: cid,
-                    name: format!("{}.cont", block.name),
-                    insts: block.insts[call_idx + 1..].to_vec(),
-                    span: block.span,
-                });
-            }
+            // Continuation block — ALWAYS created (BUG-K07): even when the call is
+            // the last instruction, inlined `Ret`s jump here, so the label must
+            // exist.
+            new_blocks.push(LirBlock {
+                id: cid,
+                name: cont_name,
+                insts: if call_idx + 1 < block.insts.len() {
+                    block.insts[call_idx + 1..].to_vec()
+                } else {
+                    // empty: control falls through to the next block in order
+                    vec![]
+                },
+                span: block.span,
+            });
         } else {
             new_blocks.push(block.clone());
         }
     }
 
-    if changed { caller.blocks = new_blocks; }
+    if changed {
+        // Apply renames across every label operand so references to old block
+        // names follow the blocks into their `{name}.pre` versions.
+        for nb in &mut new_blocks {
+            for inst in &mut nb.insts {
+                for op in &mut inst.operands {
+                    if let LirOperand::Label(l) = op {
+                        if let Some(new_name) = renames.get(l.as_str()) {
+                            *l = new_name.clone();
+                        }
+                    }
+                }
+            }
+        }
+        caller.blocks = new_blocks;
+    }
     changed
 }
 

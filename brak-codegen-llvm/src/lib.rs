@@ -101,10 +101,7 @@ impl<'a> LlvmWriter<'a> {
         self.next_local = 0;
 
         let param_str: Vec<String> = func.params.iter()
-            .map(|p| {
-                let ty = if self.float_regs.contains(p) { "double" } else { "i64" };
-                format!("{} %r{}", ty, p)
-            })
+            .map(|p| format!("i64 %r{}.param", p))
             .collect();
         let params = param_str.join(", ");
         self.emit(&format!("define i64 @{}({}) {{\n", func.name, params));
@@ -120,16 +117,16 @@ impl<'a> LlvmWriter<'a> {
             }
         }
 
+        // BUG-K10: every vreg — INCLUDING parameters — gets a stack slot.
+        // Parameters arrive as SSA values (%rN.param); storing "through" them
+        // (`store i64 %r0, i64* %r0`) produced invalid IR for any function
+        // with parameters.
         for r in &regs_used {
-            if !func.params.contains(r) {
-                let ty = if self.float_regs.contains(r) { "double" } else { "i64" };
-                self.emit(&format!("  %r{} = alloca {}, align 8\n", r, ty));
-            }
+            self.emit(&format!("  %r{} = alloca i64, align 8\n", r));
         }
 
         for p in &func.params {
-            let ty = if self.float_regs.contains(p) { "double" } else { "i64" };
-            self.emit(&format!("  store {} %r{}, {}* %r{}\n", ty, p, ty, p));
+            self.emit(&format!("  store i64 %r{}.param, i64* %r{}\n", p, p));
         }
 
         let mut block_ids: Vec<String> = Vec::new();
@@ -214,6 +211,33 @@ impl<'a> LlvmWriter<'a> {
             LirOpcode::Sub => self.emit_arith("sub", inst),
             LirOpcode::Mul => self.emit_arith("mul", inst),
             LirOpcode::Div => self.emit_arith("sdiv", inst),
+            // BUG-M17: float ops (values are i64-bit-cast slots; reinterpret to
+            // f64, operate, cast back).
+            LirOpcode::FAdd | LirOpcode::FSub | LirOpcode::FMul | LirOpcode::FDiv => {
+                let llvm_op = match inst.opcode {
+                    LirOpcode::FAdd => "fadd",
+                    LirOpcode::FSub => "fsub",
+                    LirOpcode::FMul => "fmul",
+                    _ => "fdiv",
+                };
+                if let Some(d) = inst.dest {
+                    if let (Some(l), Some(r)) = (self.op_reg(0, inst), self.op_reg(1, inst)) {
+                        let t1 = self.fresh();
+                        self.emit(&format!("  %_t{} = load i64, i64* %r{}\n", t1, l));
+                        let t2 = self.fresh();
+                        self.emit(&format!("  %_t{} = load i64, i64* %r{}\n", t2, r));
+                        let f1 = self.fresh();
+                        self.emit(&format!("  %_f{} = bitcast i64 %_t{} to double\n", f1, t1));
+                        let f2 = self.fresh();
+                        self.emit(&format!("  %_f{} = bitcast i64 %_t{} to double\n", f2, t2));
+                        let f3 = self.fresh();
+                        self.emit(&format!("  %_f{} = {} double %_f{}, %_f{}\n", f3, llvm_op, f1, f2));
+                        let t3 = self.fresh();
+                        self.emit(&format!("  %_t{} = bitcast double %_f{} to i64\n", t3, f3));
+                        self.emit(&format!("  store i64 %_t{}, i64* %r{}\n", t3, d));
+                    }
+                }
+            }
             LirOpcode::Mod => self.emit_arith("srem", inst),
             LirOpcode::Neg => {
                 if let Some(d) = inst.dest {
@@ -391,8 +415,11 @@ impl<'a> LlvmWriter<'a> {
         }
     }
 
-    fn reg_type(&self, reg: VirtReg) -> &'static str {
-        if self.float_regs.contains(&reg) { "double" } else { "i64" }
+    fn reg_type(&self, _reg: VirtReg) -> &'static str {
+        // BUG-K10: all slots are i64 alloca's (floats are stored as raw bits),
+        // so loads/stores must consistently use i64. The old code sometimes
+        // emitted `load double, i64*` — invalid IR that fails verification.
+        "i64"
     }
 
     fn op_reg(&self, idx: usize, inst: &LirInst) -> Option<VirtReg> {

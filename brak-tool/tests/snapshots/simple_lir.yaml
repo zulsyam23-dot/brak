@@ -3,12 +3,13 @@ functions:
   params: []
   blocks:
   - id: 0
-    name: entry
+    name: unreachable
     insts:
     - opcode: Mov
       dest: 1
       operands:
       - !ImmI64 42
+      call_conv: null
       debug:
         start:
           line: 1
@@ -18,10 +19,12 @@ functions:
           line: 1
           column: 23
           offset: 22
+      file_id: 0
     - opcode: Mov
       dest: 2
       operands:
       - !ImmI64 10
+      call_conv: null
       debug:
         start:
           line: 1
@@ -31,11 +34,13 @@ functions:
           line: 1
           column: 28
           offset: 27
+      file_id: 0
     - opcode: Add
       dest: 3
       operands:
       - !Reg 1
       - !Reg 2
+      call_conv: null
       debug:
         start:
           line: 1
@@ -45,10 +50,12 @@ functions:
           line: 1
           column: 28
           offset: 27
+      file_id: 0
     - opcode: Mov
       dest: 0
       operands:
       - !Reg 3
+      call_conv: null
       debug:
         start:
           line: 1
@@ -58,10 +65,12 @@ functions:
           line: 1
           column: 28
           offset: 27
+      file_id: 0
     - opcode: Ret
       dest: null
       operands:
       - !Reg 0
+      call_conv: null
       debug:
         start:
           line: 1
@@ -71,6 +80,7 @@ functions:
           line: 1
           column: 36
           offset: 35
+      file_id: 0
     span:
       start:
         line: 1
@@ -90,3 +100,8 @@ functions:
       line: 1
       column: 3
       offset: 2
+extern_functions: []
+structs: []
+enums: []
+string_table: []
+files: []

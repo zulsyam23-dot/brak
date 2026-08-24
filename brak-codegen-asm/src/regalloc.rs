@@ -29,6 +29,10 @@ impl SimpleAlloc {
     }
 }
 
+// ponytail: modulo aliasing allocator (virt % 15) — vregs can share a physical
+// register and clobber each other. This crate currently has NO consumers
+// (brak-tool/brak-easy use brak-codegen-obj); replace with a spill-all or
+// linear-scan allocator before wiring it into any pipeline.
 pub const PHYS_REGS: &[&str] = &[
     "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9",
     "r10", "r11", "r12", "r13", "r14", "r15", "rbp",

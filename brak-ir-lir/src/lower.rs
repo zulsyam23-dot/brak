@@ -229,6 +229,23 @@ impl LirLower {
             }
             MirValue::BinOp { op, lhs, rhs } => {
                 match op {
+                    // BUG-M17: float variants lower to dedicated LIR opcodes.
+                    MirBinOp::FAdd | MirBinOp::FSub | MirBinOp::FMul | MirBinOp::FDiv => {
+                        let lir_op = match op {
+                            MirBinOp::FAdd => LirOpcode::FAdd,
+                            MirBinOp::FSub => LirOpcode::FSub,
+                            MirBinOp::FMul => LirOpcode::FMul,
+                            MirBinOp::FDiv => LirOpcode::FDiv,
+                            _ => unreachable!(),
+                        };
+                        insts.push(
+                            LirInst::new(lir_op)
+                                .with_dest(*dest)
+                                .with_op(LirOperand::Reg(*lhs))
+                                .with_op(LirOperand::Reg(*rhs))
+                                .with_debug(span),
+                        );
+                    }
                     MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Mod
                     | MirBinOp::And | MirBinOp::Or
                     | MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::BitXor
@@ -281,17 +298,36 @@ impl LirLower {
                 }
             }
             MirValue::UnOp { op, expr } => {
-                let lir_op = match op {
-                    MirUnOp::Neg => LirOpcode::Neg,
-                    MirUnOp::Not => LirOpcode::Not,
-                    MirUnOp::BitNot => LirOpcode::Not, // TODO: BitNot
-                };
-                insts.push(
-                    LirInst::new(lir_op)
-                        .with_dest(*dest)
-                        .with_op(LirOperand::Reg(*expr))
-                        .with_debug(span),
-                );
+                // BUG-M16: `BitNot` previously reused `Not`, whose meaning differs
+                // per backend (bitwise in asm, logical-eqz in wasm/llvm/c).
+                // Lower it portably as `x ^ -1` (all-ones XOR = bitwise NOT).
+                if let MirUnOp::BitNot = op {
+                    insts.push(
+                        LirInst::new(LirOpcode::Mov)
+                            .with_dest(*dest)
+                            .with_op(LirOperand::ImmI64(-1))
+                            .with_debug(span),
+                    );
+                    insts.push(
+                        LirInst::new(LirOpcode::Xor)
+                            .with_dest(*dest)
+                            .with_op(LirOperand::Reg(*expr))
+                            .with_op(LirOperand::Reg(*dest))
+                            .with_debug(span),
+                    );
+                } else {
+                    let lir_op = match op {
+                        MirUnOp::Neg => LirOpcode::Neg,
+                        MirUnOp::Not => LirOpcode::Not,
+                        MirUnOp::BitNot => unreachable!("handled above"),
+                    };
+                    insts.push(
+                        LirInst::new(lir_op)
+                            .with_dest(*dest)
+                            .with_op(LirOperand::Reg(*expr))
+                            .with_debug(span),
+                    );
+                }
             }
             MirValue::GetField { object, name: _, field } => {
                 insts.push(

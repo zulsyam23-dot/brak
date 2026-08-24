@@ -214,7 +214,14 @@ dependencies = [
 name = "brak-link-archive"
 version = "0.1.0"
 dependencies = [
+ "brak-codegen-obj",
+ "brak-codegen-traits",
  "brak-core",
+ "brak-frontend",
+ "brak-ir-hir",
+ "brak-ir-lir",
+ "brak-ir-mir",
+ "brak-link-native",
 ]
 
 [[package]]
@@ -247,6 +254,7 @@ dependencies = [
  "brak-core",
  "brak-ir-lir",
  "brak-opt-traits",
+ "brak-opt-utils",
 ]
 
 [[package]]
@@ -383,6 +391,7 @@ dependencies = [
  "brak-ir-lir",
  "brak-ir-mir",
  "brak-lang-lit",
+ "brak-link-archive",
  "brak-link-native",
  "brak-link-traits",
  "brak-link-wasm",

@@ -18,6 +18,8 @@ pub enum CodegenError {
     Iced(IcedError),
     MissingDest(LirOpcode),
     InvalidLabel(String),
+    Unsupported(LirOpcode),
+    TooManyParams { callee: String, got: usize, max: usize },
 }
 
 impl fmt::Display for CodegenError {
@@ -26,6 +28,16 @@ impl fmt::Display for CodegenError {
             CodegenError::Iced(e) => write!(f, "iced error: {e}"),
             CodegenError::MissingDest(op) => write!(f, "missing destination register for {op:?}"),
             CodegenError::InvalidLabel(msg) => write!(f, "invalid label: {msg}"),
+            CodegenError::Unsupported(op) => write!(
+                f,
+                "opcode {op:?} is not yet supported by the native obj backend \
+                 (structs/pointers require layout support)"
+            ),
+            CodegenError::TooManyParams { callee, got, max } => write!(
+                f,
+                "call to '{callee}' has {got} arguments but the calling convention \
+                 supports at most {max} in registers (stack args not yet supported)"
+            ),
         }
     }
 }
@@ -140,7 +152,7 @@ pub fn emit_function(
     line_entries: &mut Vec<LineEntry>,
 ) -> Result<(Vec<u8>, Vec<Reloc>), CodegenError> {
     let mut a = CodeAssembler::new(64)?;
-    let mut relocs = Vec::new();
+    let mut relocs: Vec<Reloc> = Vec::new();
     let mut pending_relocs = Vec::new();
     let mut lir_sizes: Vec<usize> = Vec::new();
     let mut lir_line_map: Vec<(usize, usize, usize, bool)> = Vec::new();
@@ -165,15 +177,14 @@ pub fn emit_function(
     }
 
     for (i, param) in func.params.iter().enumerate() {
-        match i {
-            0 => { a.mov(vreg_ptr(*param), rdi)?; }
-            1 => { a.mov(vreg_ptr(*param), rsi)?; }
-            2 => { a.mov(vreg_ptr(*param), rdx)?; }
-            3 => { a.mov(vreg_ptr(*param), rcx)?; }
-            4 => { a.mov(vreg_ptr(*param), r8)?; }
-            5 => { a.mov(vreg_ptr(*param), r9)?; }
-            _ => {}
-        }
+        // Parameter registers follow the HOST calling convention so exported
+        // functions are directly callable from C/FFI (BUG: was hardcoded SysV).
+        let reg = if native_call_conv() == CallingConvention::Win64 {
+            match i { 0 => rcx, 1 => rdx, 2 => r8, 3 => r9, _ => continue }
+        } else {
+            match i { 0 => rdi, 1 => rsi, 2 => rdx, 3 => rcx, 4 => r8, 5 => r9, _ => continue }
+        };
+        a.mov(vreg_ptr(*param), reg)?;
     }
 
     for block in &func.blocks {
@@ -215,24 +226,28 @@ pub fn emit_function(
 
     let code = a.assemble(0x0)?;
 
-    // Convert pending relocs to real relocs by scanning for `E8 00 00 00 00` placeholders.
-    // We cannot use instruction sizes (they are 0 even after assemble()), so we find the
-    // E8 call instructions with zero rel32 by scanning the raw bytes.
-    let mut reloc_idx = 0;
-    let mut byte_pos = 0;
-    while byte_pos + 5 <= code.len() {
-        if &code[byte_pos..byte_pos + 5] == &[0xE8, 0, 0, 0, 0] {
-            if reloc_idx < pending_relocs.len() {
-                let pr = &pending_relocs[reloc_idx];
+    // BUG-L06: locate call placeholders deterministically. Each pending reloc is
+    // emitted as `E8 <u32 index>` where index is its 1-based position in
+    // pending_relocs — an immediate collision with a real E8 instruction is
+    // effectively impossible, unlike the old scan for `E8 00 00 00 00`.
+    let mut relocs = Vec::with_capacity(pending_relocs.len());
+    'relocs: for (idx, pr) in pending_relocs.iter().enumerate() {
+        let marker = (idx as u32 + 1).to_le_bytes();
+        let mut byte_pos = 0;
+        while byte_pos + 5 <= code.len() {
+            if code[byte_pos] == 0xE8 && &code[byte_pos + 1..byte_pos + 5] == &marker {
                 relocs.push(Reloc {
                     offset: byte_pos + 1, // rel32 field starts after E8 opcode
                     target_name: pr.target_name.clone(),
                     is_relative: pr.is_relative,
                 });
-                reloc_idx += 1;
+                continue 'relocs;
             }
+            byte_pos += 1;
         }
-        byte_pos += 1;
+        return Err(CodegenError::InvalidLabel(format!(
+            "call placeholder for '{}' not found in encoded output", pr.target_name
+        )));
     }
 
     // Decode instructions to get byte sizes (insts_slice[].len() is always 0 even after assemble())
@@ -307,9 +322,10 @@ fn emit_inst(
                 a.mov(vreg_ptr(d), rax)?;
             }
             (Some(d), [LirOperand::StringRef(_)]) => {
-                // TODO: emit lea rax, [rip + str_N] and .rdata section
-                a.mov(rax, 0u64)?;
-                a.mov(vreg_ptr(d), rax)?;
+                // BUG-K09: was a silent `mov rax, 0` — a null-pointer time bomb.
+                // Real .rodata emission needs section support in elf/coff/macho;
+                // failing loudly beats handing out null pointers.
+                return Err(CodegenError::Unsupported(LirOpcode::Mov));
             }
             _ => {}
         },
@@ -320,6 +336,41 @@ fn emit_inst(
         LirOpcode::And => emit_binop(a, inst)?,
         LirOpcode::Or => emit_binop(a, inst)?,
         LirOpcode::Xor => emit_binop(a, inst)?,
+        // BUG-K09: Shl/Shr existed in emit_binop but were never routed here —
+        // shift instructions were silently discarded (`_ => {}`).
+        LirOpcode::Shl => emit_binop(a, inst)?,
+        LirOpcode::Shr => emit_binop(a, inst)?,
+
+        // BUG-M17: f64 arithmetic via SSE2. Values live in stack slots as raw
+        // bits, so load/store through movsd on xmm registers.
+        LirOpcode::FAdd | LirOpcode::FSub | LirOpcode::FMul | LirOpcode::FDiv => {
+            let d = inst.dest.ok_or(CodegenError::MissingDest(inst.opcode))?;
+            let lhs = match inst.operands.first() {
+                Some(LirOperand::Reg(r)) => vreg_ptr(*r),
+                _ => return Ok(()),
+            };
+            a.movq(xmm0, lhs)?;
+            match inst.operands.get(1) {
+                Some(LirOperand::Reg(r)) => {
+                    a.movq(xmm1, vreg_ptr(*r))?;
+                }
+                Some(LirOperand::ImmF64(f)) => {
+                    // Materialize immediate bits into rax, then bit-cast to xmm1
+                    // (no extra stack slot needed).
+                    a.mov(rax, f.to_bits())?;
+                    a.movq(xmm1, rax)?;
+                }
+                _ => return Ok(()),
+            }
+            match inst.opcode {
+                LirOpcode::FAdd => a.addsd(xmm0, xmm1)?,
+                LirOpcode::FSub => a.subsd(xmm0, xmm1)?,
+                LirOpcode::FMul => a.mulsd(xmm0, xmm1)?,
+                LirOpcode::FDiv => a.divsd(xmm0, xmm1)?,
+                _ => {}
+            }
+            a.movq(vreg_ptr(d), xmm0)?;
+        }
 
         LirOpcode::Div | LirOpcode::Mod => {
             let d = inst.dest.ok_or(CodegenError::MissingDest(inst.opcode))?;
@@ -356,7 +407,7 @@ fn emit_inst(
                         CodegenError::InvalidLabel(format!("target block ID '{target}' not found"))
                     })?;
                     a.jmp(label.clone())?;
-                } 
+                }
                 // 2. Try raw name
                 else if let Some(label) = block_name_labels.get_mut(&(func_name.clone(), target.clone())) {
                     a.jmp(label.clone())?;
@@ -462,7 +513,7 @@ fn emit_inst(
                 _ => return Ok(()),
             };
 
-            let conv = inst.call_conv.unwrap_or(CallingConvention::Brak);
+            let conv = inst.call_conv.unwrap_or_else(native_call_conv);
 
             save_caller_saved(a)?;
 
@@ -470,7 +521,18 @@ fn emit_inst(
                 a.sub(rsp, 32)?;
             }
 
-            for (i, arg) in inst.operands.iter().skip(1).enumerate() {
+            let args: Vec<&LirOperand> = inst.operands.iter().skip(1).collect();
+            // BUG-L07: arguments beyond the register window were silently dropped.
+            let max_args = if conv == CallingConvention::Win64 { 4 } else { 6 };
+            if args.len() > max_args {
+                return Err(CodegenError::TooManyParams {
+                    callee: callee.clone(),
+                    got: args.len(),
+                    max: max_args,
+                });
+            }
+
+            for (i, arg) in args.into_iter().enumerate() {
                 let reg = match conv {
                     CallingConvention::Win64 => match i {
                         0 => Some(rcx),
@@ -506,14 +568,14 @@ fn emit_inst(
                         target_name: callee.clone(),
                         is_relative: true,
                     });
-                    a.db(&[0xE8, 0, 0, 0, 0])?;
+                    emit_call_placeholder(a, pending_relocs.len())?;
                 }
             } else {
                 pending_relocs.push(PendingReloc {
                     target_name: callee.clone(),
                     is_relative: true,
                 });
-                a.db(&[0xE8, 0, 0, 0, 0])?;
+                emit_call_placeholder(a, pending_relocs.len())?;
             }
 
             if conv == CallingConvention::Win64 {
@@ -527,8 +589,25 @@ fn emit_inst(
             restore_caller_saved(a)?;
         }
 
-        _ => {}
+        // BUG-K09: never silently drop opcodes. These require struct/pointer
+        // layout support that the obj backend does not have yet — failing at
+        // compile time beats emitting wrong machine code.
+        LirOpcode::Load | LirOpcode::Store | LirOpcode::Alloca
+        | LirOpcode::GetField | LirOpcode::SetField | LirOpcode::StructInit => {
+            return Err(CodegenError::Unsupported(inst.opcode));
+        }
+
+        _ => return Err(CodegenError::Unsupported(inst.opcode)),
     }
+    Ok(())
+}
+
+/// Emit `E8 <u32 marker>` — a call placeholder whose rel32 field carries the
+/// 1-based reloc index so it can be located deterministically after assembly.
+fn emit_call_placeholder(a: &mut CodeAssembler, reloc_index_1based: usize) -> Result<(), CodegenError> {
+    let marker = (reloc_index_1based as u32).to_le_bytes();
+    a.db(&[0xE8])?;
+    a.db(&[marker[0], marker[1], marker[2], marker[3]])?;
     Ok(())
 }
 
@@ -590,3 +669,13 @@ pub fn emit_binop(a: &mut CodeAssembler, inst: &LirInst) -> Result<(), CodegenEr
 
     Ok(())
 }
+
+/// The default calling convention for Brak-internal functions: Win64 on
+/// Windows, SystemV elsewhere. Using the HOST convention by default keeps
+/// exported symbols (DLLs / shared libs) directly callable from C/FFI without
+/// thunks — the old hardcoded SysV order produced garbage when a Windows
+/// caller invoked an exported function via rcx/rdx.
+pub fn native_call_conv() -> CallingConvention {
+    if cfg!(target_os = "windows") { CallingConvention::Win64 } else { CallingConvention::SystemV }
+}
+

@@ -23,26 +23,40 @@ fn optimize_function(func: &mut LirFunction) {
             match inst.opcode {
                 LirOpcode::Add => {
                     if let (Some(dest), [LirOperand::ImmI64(a), LirOperand::ImmI64(b)]) = (inst.dest, &inst.operands[..]) {
-                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a + b));
-                    } else if let [LirOperand::Reg(_), LirOperand::ImmI64(0)] = &inst.operands[..] {
+                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a.wrapping_add(*b)));
+                    } else if let [_, LirOperand::ImmI64(0)] = &inst.operands[..] {
                         inst.opcode = LirOpcode::Mov;
                         inst.operands.pop(); // x + 0 -> x
+                    } else if let [LirOperand::ImmI64(0), second] = &inst.operands[..] {
+                        // BUG-M11: commuted identity 0 + x -> x
+                        if let Some(d) = inst.dest {
+                            let x = second.clone();
+                            *inst = LirInst::new(LirOpcode::Mov).with_dest(d).with_op(x);
+                        }
                     }
                 }
                 LirOpcode::Sub => {
                     if let (Some(dest), [LirOperand::ImmI64(a), LirOperand::ImmI64(b)]) = (inst.dest, &inst.operands[..]) {
-                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a - b));
-                    } else if let [LirOperand::Reg(_), LirOperand::ImmI64(0)] = &inst.operands[..] {
+                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a.wrapping_sub(*b)));
+                    } else if let [_, LirOperand::ImmI64(0)] = &inst.operands[..] {
                         inst.opcode = LirOpcode::Mov;
                         inst.operands.pop(); // x - 0 -> x
                     }
                 }
                 LirOpcode::Mul => {
                     if let (Some(dest), [LirOperand::ImmI64(a), LirOperand::ImmI64(b)]) = (inst.dest, &inst.operands[..]) {
-                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a * b));
+                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(a.wrapping_mul(*b)));
                     } else if let [_, LirOperand::ImmI64(1)] = &inst.operands[..] {
                         inst.opcode = LirOpcode::Mov;
                         inst.operands.pop(); // x * 1 -> x
+                    } else if let [LirOperand::ImmI64(1), second] = &inst.operands[..] {
+                        // BUG-M11: commuted identity 1 * x -> x
+                        if let Some(d) = inst.dest {
+                            let x = second.clone();
+                            *inst = LirInst::new(LirOpcode::Mov).with_dest(d).with_op(x);
+                        }
+                    } else if let (Some(dest), [LirOperand::ImmI64(0), _]) = (inst.dest, &inst.operands[..]) {
+                        *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(0)); // 0 * x -> 0
                     } else if let (Some(dest), [_, LirOperand::ImmI64(0)]) = (inst.dest, &inst.operands[..]) {
                         *inst = LirInst::new(LirOpcode::Mov).with_dest(dest).with_op(LirOperand::ImmI64(0)); // x * 0 -> 0
                     }

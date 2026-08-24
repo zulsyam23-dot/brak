@@ -26,10 +26,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 |--------|--------|
 | `build_executable()` | Source → Executable (all-in-one) |
 | `compile_to_lir()` | Source → LIR (inspeksi debug) |
+| `compile_to_object()` | Source → Object file bytes (tanpa linking) |
 | `ast_to_lir()` | AST → LIR (pakai parser kustom) |
 | `lir_to_executable()` | LIR → Executable (codegen + link) |
+| `with_opt_level(level)` | Set level optimasi (`None`/`Less`/`Default`/`Aggressive`) |
+| `without_pass(name)` | Matikan satu pass (mis. `"inline"`, `"cp"`, `"fold"`, `"gvn"`, `"dce"`) |
+| `with_verbose(true)` | Log aktivitas optimizer |
 | `with_iterations(n)` | Set jumlah iterasi optimasi |
 | `with_entry_point(name)` | Ubah entry point (default: "main") |
+
+```rust
+// Contoh: build cepat tanpa inline
+EasyPipeline::new()
+    .with_opt_level(OptLevel::Less)
+    .without_pass("inline")
+    .build_executable("hello", source, "hello.exe")?;
+```
 
 ## Dependencies
 

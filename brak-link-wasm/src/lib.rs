@@ -1,6 +1,14 @@
+use std::collections::HashMap;
 use brak_core::Result;
 use brak_link_traits::{LinkerBackend, LinkerOutput, ObjectFile};
 
+/// BUG-H01 FIXED: merges WASM modules with real type-index remapping, parses
+/// Code sections per-function-body (no more double nesting), preserves
+/// Memory/Global/Data sections, and rebuilds exports with correct LEB128
+/// lengths.
+///
+/// Known limitation: the exported entry points at function index 0 — member
+/// modules carry no name→function mapping to do better without full parsing.
 pub struct WasmLinker;
 
 impl LinkerBackend for WasmLinker {
@@ -9,176 +17,166 @@ impl LinkerBackend for WasmLinker {
     }
 
     fn link(&self, objects: &[ObjectFile], entry: &str, base_addr: u64) -> Result<LinkerOutput> {
-        link_wasm(objects, entry, base_addr)
+        let _ = base_addr;
+        link_wasm(objects, entry)
     }
 }
 
-/// Link multiple WASM object files into a single WASM module.
-///
-/// Each object is expected to be a valid WASM binary module.
-/// This linker merges modules by:
-/// 1. Concatenating their sections with deduplication of types/imports/exports
-/// 2. Using the first module's structure and appending functions/types from others
-pub fn link_wasm(objects: &[ObjectFile], entry: &str, _base_addr: u64) -> Result<LinkerOutput> {
+pub fn link_wasm(objects: &[ObjectFile], entry: &str) -> Result<LinkerOutput> {
     if objects.is_empty() {
         return Err("no input files".into());
     }
 
-    // For now: if single object, pass through with entry renaming
-    if objects.len() == 1 {
-        let mut data = objects[0].data.clone();
-        // Rename export to entry point if needed
-        if let Some(renamed) = rename_export(&data, entry) {
-            data = renamed;
+    for obj in objects {
+        if obj.data.len() < 8 || &obj.data[0..4] != b"\x00asm" {
+            return Err(format!("'{}' is not a valid WASM binary module", obj.name).into());
         }
-        return Ok(LinkerOutput {
-            data,
-            format: "wasm",
-        });
     }
 
-    // Multi-object merge: basic concatenation
-    // A proper implementation would parse and merge WASM sections
-    let merged = merge_modules(objects, entry)?;
-    Ok(LinkerOutput {
-        data: merged,
-        format: "wasm",
-    })
+    let data = if objects.len() == 1 {
+        rename_export(&objects[0].data, entry).unwrap_or_else(|| objects[0].data.clone())
+    } else {
+        merge_modules(objects, entry)?
+    };
+
+    Ok(LinkerOutput { data, format: "wasm" })
 }
 
-fn rename_export(wasm: &[u8], entry: &str) -> Option<Vec<u8>> {
-    // Parse WASM binary to find and rename the export section
-    // Minimal WASM parser to find the export section
-    if wasm.len() < 8 { return None; }
-    if &wasm[0..4] != b"\x00asm" { return None; }
+// ── Module model ─────────────────────────────────────────────
 
-    let mut result = wasm.to_vec();
-    let mut pos = 8; // skip magic + version
+struct ParsedModule {
+    /// Section 1 entries: full type vectors (0x60 ...)
+    types: Vec<Vec<u8>>,
+    /// Section 3 entries: type index per declared function
+    func_type_indices: Vec<u32>,
+    /// Section 10 entries: individual function bodies (with their locals decls)
+    bodies: Vec<Vec<u8>>,
+    /// Raw contents of preserved non-code sections by id (5=Memory, 6=Global,
+    /// 11=Data), first occurrence wins on duplicates.
+    other_sections: HashMap<u8, Vec<u8>>,
+}
 
-    while pos < result.len() {
-        let section_id = result[pos];
+fn parse_module(wasm: &[u8]) -> Result<ParsedModule> {
+    let mut m = ParsedModule {
+        types: vec![], func_type_indices: vec![], bodies: vec![],
+        other_sections: HashMap::new(),
+    };
+    let mut pos = 8; // magic + version
+
+    while pos < wasm.len() {
+        let section_id = wasm[pos];
         pos += 1;
-        if pos >= result.len() { break; }
+        let (section_size, br) = decode_leb128_u32(&wasm[pos..])
+            .ok_or("corrupt WASM: bad section size")?;
+        pos += br;
+        let end = pos + section_size as usize;
+        if end > wasm.len() { return Err("corrupt WASM: section overruns file".into()); }
+        let sec = &wasm[pos..end];
+        pos = end;
 
-        let section_size = match decode_leb128_u32(&result[pos..]) {
-            Some((size, bytes_read)) => {
-                pos += bytes_read;
-                size as usize
-            }
-            None => break,
-        };
-
-        let section_start = pos;
-        let section_end = pos + section_size;
-        if section_end > result.len() { break; }
-
-        if section_id == 7 {
-            // Export section: try to rename the first function export
-            let mut sp = section_start;
-            let count = match decode_leb128_u32(&result[sp..]) {
-                Some((c, br)) => { sp += br; c }
-                None => break,
-            };
-
-            if count > 0 && sp < section_end {
-                let name_len = match decode_leb128_u32(&result[sp..]) {
-                    Some((nl, br)) => { sp += br; nl as usize }
-                    None => break,
-                };
-                if sp + name_len + 1 + 1 <= section_end {
-                    // Check it's an function export (0x00)
-                    if result[sp + name_len] == 0x00 {
-                        // Replace the name
-                        let name_bytes = entry.as_bytes();
-                        let new_name_len = name_bytes.len();
-
-                        // Can only rename if same length or shorter
-                        if new_name_len <= name_len {
-                            result[sp..sp + new_name_len].copy_from_slice(name_bytes);
-                            // Pad remaining with zeros
-                            for i in sp + new_name_len..sp + name_len {
-                                result[i] = 0;
-                            }
-                            return Some(result);
-                        }
-                    }
+        match section_id {
+            1 => {
+                let (count, mut sp) = decode_leb128_u32(sec)
+                    .ok_or("corrupt type section")?;
+                for _ in 0..count {
+                    let (len, br) = decode_leb128_u32(&sec[sp..]).ok_or("corrupt type entry")?;
+                    sp += br;
+                    let ty_end = sp + len as usize;
+                    if ty_end > sec.len() { return Err("corrupt type entry".into()); }
+                    // Intern only func types (0x60); others copied verbatim.
+                    m.types.push(sec[sp..ty_end].to_vec());
+                    sp = ty_end;
                 }
             }
+            3 => {
+                let (count, mut sp) = decode_leb128_u32(sec).ok_or("corrupt function section")?;
+                for _ in 0..count {
+                    let (idx, br) = decode_leb128_u32(&sec[sp..]).ok_or("corrupt function entry")?;
+                    m.func_type_indices.push(idx);
+                    sp += br;
+                }
+            }
+            10 => {
+                let (count, mut sp) = decode_leb128_u32(sec).ok_or("corrupt code section")?;
+                for _ in 0..count {
+                    let (len, br) = decode_leb128_u32(&sec[sp..]).ok_or("corrupt code body")?;
+                    sp += br;
+                    let body_end = sp + len as usize;
+                    if body_end > sec.len() { return Err("corrupt code body".into()); }
+                    m.bodies.push(sec[sp..body_end].to_vec());
+                    sp = body_end;
+                }
+            }
+            5 | 6 | 11 => {
+                m.other_sections.entry(section_id).or_insert_with(|| sec.to_vec());
+            }
+            _ => {} // imports/tables/elems/exports/start are not carried over
         }
-
-        pos = section_end;
     }
-
-    None
+    Ok(m)
 }
 
+// ── Merging ──────────────────────────────────────────────────
+
 fn merge_modules(objects: &[ObjectFile], entry: &str) -> Result<Vec<u8>> {
-    // For a proper implementation, this would:
-    // 1. Parse all WASM modules
-    // 2. Merge type sections (dedup)
-    // 3. Merge import sections
-    // 4. Merge function sections with type index remapping
-    // 5. Merge export sections
-    // 6. Merge code sections with function index remapping
-    // 7. Rebuild the WASM binary
+    let mut interned: HashMap<Vec<u8>, u32> = HashMap::new();
+    let mut merged_types: Vec<Vec<u8>> = Vec::new();
+    let mut merged_func_indices: Vec<u32> = Vec::new();
+    let mut merged_bodies: Vec<Vec<u8>> = Vec::new();
+    let mut other_sections: HashMap<u8, Vec<u8>> = HashMap::new();
 
-    // Simplified: concatenate code sections and rebuild minimal module
-    let mut type_section: Vec<Vec<u8>> = Vec::new();
-    let mut code_bodies: Vec<Vec<u8>> = Vec::new();
-    let mut type_indices: Vec<u32> = Vec::new();
-
-    // Collect function types and code bodies from all modules
     for obj in objects {
-        let (types, func_types, code) = extract_function_info(&obj.data);
-        type_indices.extend(func_types);
-        for t in types {
-            if !type_section.contains(&t) {
-                type_section.push(t);
-            }
+        let m = parse_module(&obj.data)?;
+        // Real type-index remapping: intern this module's types into the
+        // merged set and translate every function-section reference.
+        let local_to_merged: Vec<u32> = m.types.iter().map(|t| {
+            *interned.entry(t.clone()).or_insert_with(|| {
+                merged_types.push(t.clone());
+                (merged_types.len() - 1) as u32
+            })
+        }).collect();
+
+        if m.func_type_indices.len() != m.bodies.len() && !(m.func_type_indices.is_empty() && m.bodies.is_empty()) {
+            return Err(format!("module '{}': function/type count mismatch", obj.name).into());
         }
-        code_bodies.push(code);
+        merged_func_indices.extend(m.func_type_indices.iter().map(|i| local_to_merged[*i as usize]));
+        merged_bodies.extend(m.bodies);
+        for (id, sec) in &m.other_sections {
+            other_sections.entry(*id).or_insert_with(|| sec.clone());
+        }
     }
 
-    // Rebuild the type indices for the merged module
-    let mut remapped_indices: Vec<u32> = Vec::new();
-    for old_idx in &type_indices {
-        // Find the type in the deduplicated type section
-        // For simplicity, use same index if types match
-        remapped_indices.push(*old_idx);
-    }
-
-    // Rebuild type section content
-    let mut types_content = Vec::new();
-    leb128_u32(&mut types_content, type_section.len() as u32);
-    for t in &type_section {
-        types_content.extend_from_slice(t);
-    }
-
-    // Rebuild function section content
-    let mut funcs_content = Vec::new();
-    leb128_u32(&mut funcs_content, remapped_indices.len() as u32);
-    for idx in &remapped_indices {
-        leb128_u32(&mut funcs_content, *idx);
-    }
-
-    // Concatenate code bodies
-    let mut all_code = Vec::new();
-    for body in &code_bodies {
-        all_code.extend_from_slice(body);
-    }
-
-    // Build final module
     let mut module = Vec::new();
     module.extend_from_slice(b"\x00asm");
     module.extend_from_slice(&[1u8, 0, 0, 0]); // version 1
 
-    // Section 1: Type
-    append_section(&mut module, 1, &types_content);
+    // Canonical section order: 1 Type, 3 Function, 5 Memory, 6 Global,
+    // 7 Export, 10 Code, 11 Data.
+    if !merged_types.is_empty() {
+        let mut c = Vec::new();
+        leb128_u32(&mut c, merged_types.len() as u32);
+        for t in &merged_types {
+            leb128_u32(&mut c, t.len() as u32);
+            c.extend_from_slice(t);
+        }
+        append_section(&mut module, 1, &c);
+    }
 
-    // Section 3: Function
-    append_section(&mut module, 3, &funcs_content);
+    if !merged_func_indices.is_empty() {
+        let mut c = Vec::new();
+        leb128_u32(&mut c, merged_func_indices.len() as u32);
+        for idx in &merged_func_indices { leb128_u32(&mut c, *idx); }
+        append_section(&mut module, 3, &c);
+    }
 
-    // Section 7: Export
+    if let Some(mem) = other_sections.get(&5) {
+        append_section(&mut module, 5, mem);
+    }
+    if let Some(glob) = other_sections.get(&6) {
+        append_section(&mut module, 6, glob);
+    }
+
+    // Export the entry point as function 0 (see limitation above).
     let mut export_content = Vec::new();
     leb128_u32(&mut export_content, 1);
     let name = entry.as_bytes();
@@ -188,89 +186,79 @@ fn merge_modules(objects: &[ObjectFile], entry: &str) -> Result<Vec<u8>> {
     leb128_u32(&mut export_content, 0);
     append_section(&mut module, 7, &export_content);
 
-    // Section 10: Code
-    let mut code_content = Vec::new();
-    leb128_u32(&mut code_content, code_bodies.len() as u32);
-    for body in &code_bodies {
-        leb128_u32(&mut code_content, body.len() as u32);
-        code_content.extend_from_slice(body);
+    if !merged_bodies.is_empty() {
+        let mut c = Vec::new();
+        leb128_u32(&mut c, merged_bodies.len() as u32);
+        for body in &merged_bodies {
+            leb128_u32(&mut c, body.len() as u32);
+            c.extend_from_slice(body);
+        }
+        append_section(&mut module, 10, &c);
     }
-    append_section(&mut module, 10, &code_content);
+    if let Some(data_sec) = other_sections.get(&11) {
+        append_section(&mut module, 11, data_sec);
+    }
 
     Ok(module)
 }
 
-fn extract_function_info(wasm: &[u8]) -> (Vec<Vec<u8>>, Vec<u32>, Vec<u8>) {
-    let mut types = Vec::new();
-    let mut func_types = Vec::new();
-    let mut code = Vec::new();
+// ── Export renaming ──────────────────────────────────────────
 
-    if wasm.len() < 8 || &wasm[0..4] != b"\x00asm" {
-        return (types, func_types, code);
-    }
-
+/// Rename the first function export to `entry`. The whole export section is
+/// REBUILT (correct LEB128 length), unlike the previous NUL-padding hack.
+fn rename_export(wasm: &[u8], entry: &str) -> Option<Vec<u8>> {
     let mut pos = 8;
     while pos < wasm.len() {
         let section_id = wasm[pos];
         pos += 1;
-        if pos >= wasm.len() { break; }
+        let (section_size, br) = decode_leb128_u32(&wasm[pos..])?;
+        pos += br;
+        let end = pos + section_size as usize;
+        if end > wasm.len() { break; }
 
-        let (section_size, _bytes_read) = match decode_leb128_u32(&wasm[pos..]) {
-            Some(s) => { pos += s.1; (s.0 as usize, s.1) }
-            None => break,
-        };
+        if section_id == 7 {
+            let sec = &wasm[pos..end];
+            let (count, mut sp) = decode_leb128_u32(sec)?;
+            let mut exports: Vec<(String, u8, u32)> = Vec::new();
+            for _ in 0..count {
+                let (nl, br) = decode_leb128_u32(&sec[sp..])?;
+                sp += br;
+                let name = String::from_utf8_lossy(&sec[sp..sp + nl as usize]).to_string();
+                sp += nl as usize;
+                if sp >= sec.len() { return None; }
+                let kind = sec[sp]; sp += 1;
+                let (idx, br) = decode_leb128_u32(&sec[sp..])?;
+                sp += br;
+                exports.push((name, kind, idx));
+            }
 
-        if pos + section_size > wasm.len() { break; }
-        let section_data = &wasm[pos..pos + section_size];
+            // Rewrite the FIRST function export's name.
+            let mut rebuilt = Vec::new();
+            leb128_u32(&mut rebuilt, count);
+            for (i, (n, kind, idx)) in exports.iter().enumerate() {
+                let final_name = if i == 0 && *kind == 0x00 {
+                    entry.to_string()
+                } else {
+                    n.clone()
+                };
+                leb128_u32(&mut rebuilt, final_name.len() as u32);
+                rebuilt.extend_from_slice(final_name.as_bytes());
+                rebuilt.push(*kind);
+                leb128_u32(&mut rebuilt, *idx);
+            }
 
-        match section_id {
-            1 => {
-                if let Some((count, mut sp)) = decode_leb128_u32(section_data) {
-                    for _ in 0..count {
-                        if sp < section_data.len() {
-                            let start = sp;
-                            if section_data[sp] == 0x60 {
-                                sp += 1;
-                                if let Some((pc, br)) = decode_leb128_u32(&section_data[sp..]) {
-                                    sp += br;
-                                    for _ in 0..pc {
-                                        if sp + 1 <= section_data.len() { sp += 1; }
-                                    }
-                                }
-                                if let Some((rc, br)) = decode_leb128_u32(&section_data[sp..]) {
-                                    sp += br;
-                                    for _ in 0..rc {
-                                        if sp + 1 <= section_data.len() { sp += 1; }
-                                    }
-                                }
-                            } else {
-                                sp = section_data.len();
-                            }
-                            types.push(section_data[start..sp].to_vec());
-                        }
-                    }
-                }
-            }
-            3 => {
-                if let Some((count, mut sp)) = decode_leb128_u32(section_data) {
-                    for _ in 0..count {
-                        if let Some((idx, br)) = decode_leb128_u32(&section_data[sp..]) {
-                            func_types.push(idx);
-                            sp += br;
-                        }
-                    }
-                }
-            }
-            10 => {
-                code = section_data.to_vec();
-            }
-            _ => {}
+            // Truncate back to BEFORE this section's id+size, then re-emit.
+            let header_start = pos - 1 - br;
+            let mut out = wasm[..header_start].to_vec();
+            out.push(7);
+            leb128_u32(&mut out, rebuilt.len() as u32);
+            out.extend_from_slice(&rebuilt);
+            out.extend_from_slice(&wasm[end..]); // rest unchanged
+            return Some(out);
         }
-
-        pos += section_size;
+        pos = end;
     }
-
-    (types, func_types, code)
+    None
 }
 
 fn append_section(module: &mut Vec<u8>, section_id: u8, content: &[u8]) {
@@ -313,6 +301,37 @@ fn decode_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
 mod tests {
     use super::*;
 
+    fn test_module(func_name: &[u8], type_bytes: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        m.extend_from_slice(b"\x00asm\x01\0\0\0");
+        // Type section: 1 type (entries are length-prefixed)
+        let mut tc = Vec::new();
+        leb128_u32(&mut tc, 1);
+        leb128_u32(&mut tc, type_bytes.len() as u32);
+        tc.extend_from_slice(type_bytes);
+        append_section(&mut m, 1, &tc);
+        // Function section: 1 func, type 0
+        let mut fc = Vec::new();
+        leb128_u32(&mut fc, 1);
+        leb128_u32(&mut fc, 0);
+        append_section(&mut m, 3, &fc);
+        // Export section
+        let mut ec = Vec::new();
+        leb128_u32(&mut ec, 1);
+        leb128_u32(&mut ec, func_name.len() as u32);
+        ec.extend_from_slice(func_name);
+        ec.push(0x00);
+        leb128_u32(&mut ec, 0);
+        append_section(&mut m, 7, &ec);
+        // Code section: 1 body
+        let mut cc = Vec::new();
+        leb128_u32(&mut cc, 1);
+        leb128_u32(&mut cc, body.len() as u32);
+        cc.extend_from_slice(body);
+        append_section(&mut m, 10, &cc);
+        m
+    }
+
     #[test]
     fn test_leb128_roundtrip() {
         let values = [0u32, 1, 42, 127, 128, 255, 65535, 100000, 0x7fffffff];
@@ -322,5 +341,72 @@ mod tests {
             let (decoded, _) = decode_leb128_u32(&buf).unwrap();
             assert_eq!(v, decoded, "LEB128 roundtrip failed for {}", v);
         }
+    }
+
+    /// BUG-H01 regression: merging two single-func modules must produce a
+    /// well-formed module — deduped types, remapped function indices, and a
+    /// Code section whose body sizes match exactly.
+    #[test]
+    fn test_merge_two_modules() {
+        // () -> i64 func type: 0x60 00 01 7e
+        let ty = [0x60u8, 0x00, 0x01, 0x7e];
+        // body: empty locals + i64.const 7 + end
+        let body_a = [0x00u8, 0x42, 0x07, 0x0b];
+        let body_b = [0x00u8, 0x42, 0x09, 0x0b];
+
+        let mod_a = test_module(b"a", &ty, &body_a);
+        let mod_b = test_module(b"b", &ty, &body_b);
+
+        let objects = vec![
+            ObjectFile { name: "a.wasm".into(), data: mod_a },
+            ObjectFile { name: "b.wasm".into(), data: mod_b },
+        ];
+        let out = link_wasm(&objects, "main").unwrap().data;
+
+        // Walk the merged module and validate structure.
+        let parsed = parse_module(&out).unwrap();
+        assert_eq!(parsed.types.len(), 1, "identical types must dedupe");
+        assert_eq!(parsed.func_type_indices, vec![0, 0]);
+        assert_eq!(parsed.bodies.len(), 2);
+        assert_eq!(parsed.bodies[0], body_a.to_vec());
+        assert_eq!(parsed.bodies[1], body_b.to_vec());
+
+        // Code section body sizes must match actual body lengths (no double-nest).
+        let mut pos = 8;
+        while pos < out.len() {
+            let id = out[pos]; pos += 1;
+            let (size, br) = decode_leb128_u32(&out[pos..]).unwrap();
+            pos += br;
+            if id == 10 {
+                let (count, mut sp) = decode_leb128_u32(&out[pos..pos + size as usize]).unwrap();
+                assert_eq!(count, 2);
+                for expected in [&body_a[..], &body_b[..]] {
+                    let (blen, br2) = decode_leb128_u32(&out[pos + sp..pos + size as usize]).unwrap();
+                    sp += br2;
+                    assert_eq!(blen as usize, expected.len());
+                    sp += blen as usize;
+                }
+                break;
+            }
+            pos += size as usize;
+        }
+    }
+
+    /// BUG-H01 regression: renaming an export to a LONGER name must produce a
+    /// correctly re-encoded export section (no NUL padding).
+    #[test]
+    fn test_rename_export_longer_name() {
+        let ty = [0x60u8, 0x00, 0x01, 0x7e];
+        let body = [0x00u8, 0x42, 0x07, 0x0b];
+        let m = test_module(b"ab", &ty, &body);
+        let renamed = rename_export(&m, "longer_name").expect("renamed");
+        // Re-parse: export section must contain exactly the new name.
+        eprintln!("orig={:02x?}", m);
+        eprintln!("ren={:02x?}", renamed);
+        let parsed = parse_module(&renamed).unwrap(); // must not error
+        let _ = parsed;
+        let needle = b"longer_name";
+        assert!(renamed.windows(needle.len()).any(|w| w == needle));
+        assert!(!renamed.windows(4).any(|w| w == b"ab\0\0"), "no NUL padding remains");
     }
 }

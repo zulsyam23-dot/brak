@@ -8,14 +8,14 @@ Brak adalah bahasa pemrograman utama dalam toolkit ini. Ia dirancang untuk menja
 Fungsi didefinisikan dengan kata kunci `fn`. Setiap fungsi harus memiliki tipe kembalian eksplisit (gunakan `Void` jika tidak ada).
 
 ```brak
-fn add(a: I32, b: I32) -> I32 {
-    let result: I32 = a + b;
+fn add(a: i32, b: i32) -> i32 {
+    let result: i32 = a + b;
     result
 }
 
-fn main() -> I32 {
-    let x: I32 = 10;
-    let y: I32 = 20;
+fn main() -> i32 {
+    let x: i32 = 10;
+    let y: i32 = 20;
     add(x, y)
 }
 ```
@@ -24,10 +24,10 @@ fn main() -> I32 {
 Variabel didefinisikan menggunakan `let`. Brak adalah bahasa *statically typed*.
 
 ```brak
-let angka: I32 = 42;
-let desimal: F64 = 3.14;
-let benar: Bool = true;
-let teks: String = "Halo Brak";
+let angka: i32 = 42;
+let desimal: f64 = 3.14;
+let benar: bool = true;
+let teks: string = "Halo Brak";
 ```
 
 ### 3. Struktur Data (Struct & Enum)
@@ -37,11 +37,11 @@ Digunakan untuk mengelompokkan data terkait.
 
 ```brak
 struct Point {
-    x: I32,
-    y: I32,
+    x: i32,
+    y: i32,
 }
 
-fn main() -> I32 {
+fn main() -> i32 {
     let p: Point = Point { x: 10, y: 20 };
     p.x = 15;
     p.x + p.y
@@ -53,10 +53,14 @@ Digunakan untuk tipe data yang bisa memiliki beberapa varian.
 
 ```brak
 enum Result {
-    Ok(I32),
+    Ok(i32),
     Error,
 }
 ```
+
+> ⚠️ Catatan status: enum dengan payload (`Ok(i32)`) sudah bisa dideklarasikan,
+> tetapi konstruksi dan destrukturisasi nilainya belum didukung penuh oleh
+> compiler. `match` mendukung pattern literal (`1 => ...`) dan wildcard (`_ => ...`).
 
 ### 4. Kontrol Alur
 
@@ -71,17 +75,17 @@ if x > 10 {
 
 **While Loop:**
 ```brak
-let i: I32 = 0;
+let i: i32 = 0;
 while i < 5 {
     i = i + 1;
 }
 ```
 
 ## Tipe Data yang Didukung
-- `I32`, `I64`: Bilangan bulat 32-bit dan 64-bit.
-- `F32`, `F64`: Bilangan desimal (float) 32-bit dan 64-bit.
-- `Bool`: Nilai kebenaran (`true` atau `false`).
-- `String`: Teks (UTF-8).
+- `i32`, `i64`: Bilangan bulat 32-bit dan 64-bit.
+- `f32`, `f64`: Bilangan desimal (float) 32-bit dan 64-bit.
+- `bool`: Nilai kebenaran (`true` atau `false`).
+- `string`: Teks (UTF-8).
 - `Void`: Digunakan untuk fungsi yang tidak mengembalikan nilai.
 
 ## Praktik Terbaik (Best Practices)
@@ -101,3 +105,4 @@ brak build main.brk --output main.exe
 # Emit IR untuk debugging
 brak emit-ir main.brk --level hir
 ```
+

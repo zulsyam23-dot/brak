@@ -24,23 +24,39 @@ impl LirOptimizationPass for GlobalValueNumbering {
     }
 }
 
+// ponytail: per-block CSE instead of dominator-based GVN — cross-block
+// redundancy stays unexploited until SSA lands in LIR.
 fn optimize_function(func: &mut LirFunction) {
-    let mut value_table: HashMap<Value, usize> = HashMap::new();
-    let mut reg_map: HashMap<usize, usize> = HashMap::new();
-
-    // Global Value Numbering (GVN) Sederhana:
-    // Identifikasi ekspresi redundan di seluruh fungsi.
-    // Karena Brak LIR belum menggunakan SSA secara penuh (phi nodes),
-    // kita harus berhati-hati dengan register yang ditulis ulang.
-    
-    // Pass 1: Identifikasi register yang menampung hasil ekspresi yang sama
     for block in &mut func.blocks {
+        // value -> register holding it, valid only up to the next write
+        // of any register it depends on. Without SSA we cannot know if a
+        // cached value dominates later uses, so scope everything to one block.
+        let mut value_table: HashMap<Value, usize> = HashMap::new();
+
         for inst in &mut block.insts {
-            // Identifikasi ekspresi biner/unary
+            // A write to `d` invalidates: (a) values cached in d,
+            // (b) values computed FROM d (their operands just changed meaning).
+            if let Some(d) = inst.dest {
+                value_table.retain(|v, held| {
+                    *held != d && !value_uses_reg(v, d)
+                });
+            }
+
             let expr = match inst.opcode {
                 op @ (LirOpcode::Add | LirOpcode::Sub | LirOpcode::Mul | LirOpcode::And | LirOpcode::Or | LirOpcode::Xor | LirOpcode::Shl | LirOpcode::Shr) => {
                     if let [lhs, rhs] = &inst.operands[..] {
-                        Some(Value::BinOp(op, lhs.clone(), rhs.clone()))
+                        // BUG-M12: commutative ops canonicalize operand order so
+                        // `a+b` and `b+a` share a value number. Sub/Shl/Shr are
+                        // NOT commutative — order preserved.
+                        let (lhs, rhs) = if matches!(op,
+                            LirOpcode::Add | LirOpcode::Mul | LirOpcode::And | LirOpcode::Or | LirOpcode::Xor)
+                            && operand_rank(rhs) < operand_rank(lhs)
+                        {
+                            (rhs.clone(), lhs.clone())
+                        } else {
+                            (lhs.clone(), rhs.clone())
+                        };
+                        Some(Value::BinOp(op, lhs, rhs))
                     } else { None }
                 }
                 op @ (LirOpcode::Neg | LirOpcode::Not) => {
@@ -53,35 +69,35 @@ fn optimize_function(func: &mut LirFunction) {
 
             if let (Some(value), Some(dest)) = (expr, inst.dest) {
                 if let Some(&prev_reg) = value_table.get(&value) {
-                    // Ganti dengan Mov dari register yang sudah ada
+                    // Redundant computation: reuse the previous result.
                     *inst = LirInst::new(LirOpcode::Mov)
                         .with_dest(dest)
                         .with_op(LirOperand::Reg(prev_reg));
-                    reg_map.insert(dest, prev_reg);
+                    value_table.insert(value, dest);
                 } else {
                     value_table.insert(value, dest);
                 }
-            } else if let (LirOpcode::Mov, Some(dest), [LirOperand::Reg(src)]) = (inst.opcode, inst.dest, &inst.operands[..]) {
-                reg_map.insert(dest, *src);
             }
         }
     }
+}
 
-    // Pass 2: Terapkan canonical registers ke semua instruksi
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            for op in &mut inst.operands {
-                if let LirOperand::Reg(r) = op {
-                    let mut current_r = *r;
-                    while let Some(&canonical) = reg_map.get(&current_r) {
-                        if canonical == current_r { break; }
-                        current_r = canonical;
-                    }
-                    if current_r != *r {
-                        *op = LirOperand::Reg(current_r);
-                    }
-                }
-            }
-        }
+fn value_uses_reg(v: &Value, reg: usize) -> bool {
+    fn op_is_reg(op: &LirOperand, reg: usize) -> bool {
+        matches!(op, LirOperand::Reg(r) if *r == reg)
+    }
+    match v {
+        Value::BinOp(_, a, b) => op_is_reg(a, reg) || op_is_reg(b, reg),
+        Value::UnaryOp(_, a) => op_is_reg(a, reg),
+    }
+}
+
+/// Deterministic ordering key for canonicalizing commutative operands.
+/// Immediates sort before registers so `Add 5, %r1` == `Add %r1, 5`.
+fn operand_rank(op: &LirOperand) -> (u8, i64) {
+    match op {
+        LirOperand::ImmI64(v) => (0, *v),
+        LirOperand::Reg(r) => (1, *r as i64),
+        _ => (2, 0),
     }
 }

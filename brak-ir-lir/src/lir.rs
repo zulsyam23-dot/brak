@@ -79,6 +79,8 @@ pub struct LirInst {
 pub enum LirOpcode {
     Mov,
     Add, Sub, Mul, Div, Mod,
+    // BUG-M17: float arithmetic (f64 semantics in every backend).
+    FAdd, FSub, FMul, FDiv,
     Neg, Not,
     And, Or, Xor,
     Shl, Shr,

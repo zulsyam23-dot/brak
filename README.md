@@ -79,8 +79,8 @@ Untuk memastikan kode Anda berjalan lancar tanpa kesalahan:
 ## Fitur Unggulan v1.0
 - **Self-Hosting Ready**: Dukungan `struct` dan `enum` lengkap untuk membangun kompilator di dalam Brak.
 - **Zero-Dependency**: Tidak butuh LLVM/GCC terinstal di sistem target.
-- **Smart Caching**: Kompilasi instan untuk proyek besar berkat `brak-bitcode`.
-- **High Performance**: Pipeline optimasi 8+ pass (Inlining, DCE, GVN, dkk).
+- **Smart Caching**: Sistem caching IR tersedia via `brak-bitcode` (eksperimental — belum terintegrasi penuh ke CLI).
+- **High Performance**: Pipeline optimasi 8 pass aktif (Fold, CP, Inline, GVN, LICM, JT, TCO, DCE) dengan differential testing.
 
 ---
 *Dibuat secara profesional untuk memastikan modularitas, kejujuran performa, dan kemudahan pengembangan bahasa.*

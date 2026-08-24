@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use brak_core::Result;
 use brak_ir_lir::lir::{LirProgram, LirFunction, LirInst, LirOpcode, LirOperand, VirtReg, BlockId};
 use brak_opt_traits::LirOptimizationPass;
-use brak_opt_utils::{build_cfg, compute_dominance, find_natural_loops, CfgGraph, NaturalLoop};
+use brak_opt_utils::{build_cfg, compute_dominance, dominates, find_natural_loops, CfgGraph, NaturalLoop};
 
 pub struct Licm;
 
@@ -41,12 +41,18 @@ fn apply_licm(func: &mut LirFunction) {
 fn hoist_invariants(func: &mut LirFunction, cfg: &CfgGraph, lp: &NaturalLoop) {
     let header = lp.header;
 
-    // Find pre-header: predecessor of header NOT in loop body
+    // Find pre-header: predecessor(s) of header NOT in loop body.
     let outside_preds: Vec<BlockId> = cfg.predecessors.get(&header)
         .map(|p| p.iter().copied().filter(|b| !lp.body.contains(b)).collect())
         .unwrap_or_default();
-    if outside_preds.is_empty() { return; }
+    // BUG-K05: with multiple outside predecessors there is no single pre-header
+    // that dominates the header — hoisting there would execute code on paths
+    // that never enter the loop (or miss domination entirely). Skip instead.
+    if outside_preds.len() != 1 { return; }
     let pre_header = outside_preds[0];
+
+    let dom = compute_dominance(func, cfg);
+    if !dominates(&dom, pre_header, header) { return; }
 
     // Fixed-point: find all loop-invariant instructions
     // An instruction is invariant if all its register operands are defined
@@ -127,11 +133,21 @@ fn hoist_invariants(func: &mut LirFunction, cfg: &CfgGraph, lp: &NaturalLoop) {
     }
 }
 
+/// BUG-K05: strict WHITELIST of side-effect-free, non-trapping instructions.
+///
+/// The old blacklist omitted `Div`/`Mod` (hoisting them out of a loop that may
+/// run zero times introduces a divide-by-zero trap), `Load`, and `SetField`
+/// (a mutation executed once instead of once per iteration).
+///
+/// NOTE: `Cmp`/`Set*` are deliberately excluded — `Set*` consumes implicit
+/// flag state produced by a preceding `Cmp`; hoisting one without the other
+/// (or interleaved with the loop's own comparisons) corrupts branch decisions.
 fn is_eligible(inst: &LirInst) -> bool {
-    !matches!(inst.opcode,
-        LirOpcode::Call | LirOpcode::Store | LirOpcode::Ret
-        | LirOpcode::Jmp | LirOpcode::Br | LirOpcode::Push | LirOpcode::Pop
-        | LirOpcode::Comment | LirOpcode::Alloca
+    matches!(inst.opcode,
+        LirOpcode::Mov
+        | LirOpcode::Add | LirOpcode::Sub | LirOpcode::Mul
+        | LirOpcode::And | LirOpcode::Or | LirOpcode::Xor
+        | LirOpcode::Shl | LirOpcode::Shr
     )
 }
 

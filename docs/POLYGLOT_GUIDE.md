@@ -40,11 +40,14 @@ int main() {
 Brak mendukung pembuatan modul ekstensi Python secara otomatis. Fungsi Brak akan dibungkus menjadi fungsi Python yang bisa di-`import` secara langsung.
 
 ### Cara Menghasilkan Binding Python
-Gunakan perintah `polyglot` pada `brak-tool`:
+Gunakan `build` dengan flag `--py-module` pada `brak-tool`:
 
 ```bash
-cargo run -p brak-tool -- polyglot math.brk --lang python --output-dir ./math_py
+cargo run -p brak-tool -- build math.brk --py-module math_py --output-dir ./math_py
 ```
+
+> Catatan: binding Python saat ini berupa proyek PyO3 yang di-generate;
+> tipe `String`/pointer masih dipetakan sebagai integer — lihat tabel di bawah.
 
 ### Penggunaan di Python
 Setelah modul dibangun (menggunakan `maturin`), Anda bisa menggunakannya seperti library Python biasa:
@@ -57,20 +60,21 @@ print(f"Hasil dari Brak: {hasil}")
 ```
 
 ## Tabel Pemetaan Tipe Data
-| Tipe Brak | Tipe C (FFI) | Tipe Python |
+| Tipe Brak | Tipe C (FFI) | Tipe Python (PyO3 generator) |
 |-----------|--------------|-------------|
-| `I32`     | `int32_t`    | `int`       |
-| `I64`     | `int64_t`    | `int`       |
-| `F64`     | `double`     | `float`     |
-| `Bool`    | `int8_t`     | `bool`      |
-| `String`  | `char*`      | `str`       |
+| `i32`     | `int32_t`    | `int`       |
+| `i64`     | `int64_t`    | `int`       |
+| `f64`     | `double`     | `float`     |
+| `bool`    | `bool` / `int8_t` | `bool` |
+| `string`  | `char*`      | `usize` (pointer, belum otomatis dikonversi ke `str`) |
 
 ## Tips Alur Kerja Aman (Safe Workflow)
 
-1. **Verifikasi ABI**: Gunakan `extern "C"` di Brak untuk fungsi yang akan diekspor guna memastikan kompatibilitas ABI yang stabil.
+1. **Verifikasi ABI**: Gunakan `extern fn` di Brak (sintaks `extern "C"` belum didukung parser) untuk fungsi yang akan diekspor guna memastikan kompatibilitas ABI yang stabil.
 2. **Memory Management**: Brak menggunakan model memori yang sederhana. Saat mengirim `String` ke C, pastikan Anda memahami bahwa itu adalah pointer ke `char`. Jangan melakukan `free()` di C pada string yang dimiliki oleh Brak kecuali ditentukan lain.
 3. **Sinkronisasi Header**: Selalu jalankan ulang perintah `polyglot` setiap kali Anda mengubah tanda tangan fungsi (function signature) di Brak agar file `.h` tetap sinkron.
 4. **Python Maturin**: Untuk integrasi Python, gunakan `maturin develop` di dalam folder output untuk instalasi cepat saat pengembangan.
 
 ---
 *Sistem Polyglot memastikan tidak ada penurunan performa saat memanggil fungsi antar bahasa karena semua disatukan di level Low-level IR (LIR).*
+

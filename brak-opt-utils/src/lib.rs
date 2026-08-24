@@ -20,6 +20,18 @@ pub struct CfgGraph {
 pub fn build_cfg(func: &LirFunction) -> CfgGraph {
     let mut succ: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
     let block_map: HashMap<&str, BlockId> = func.blocks.iter().map(|b| (b.name.as_str(), b.id)).collect();
+    // BUG-K06: LIR branches normally target "block_{id}", so resolution must try
+    // the id form FIRST and only fall back to block names. Name-only lookup never
+    // matched real compiler output, leaving the CFG with fall-through edges only.
+    let id_set: HashSet<BlockId> = func.blocks.iter().map(|b| b.id).collect();
+    let resolve = |name: &str| -> Option<BlockId> {
+        if let Some(id) = name.strip_prefix("block_").and_then(|s| s.parse::<BlockId>().ok()) {
+            if id_set.contains(&id) {
+                return Some(id);
+            }
+        }
+        block_map.get(name).copied()
+    };
 
     for (bi, block) in func.blocks.iter().enumerate() {
         let edges = succ.entry(block.id).or_default();
@@ -27,20 +39,23 @@ pub fn build_cfg(func: &LirFunction) -> CfgGraph {
             match inst.opcode {
                 LirOpcode::Jmp => {
                     if let Some(LirOperand::Label(name)) = inst.operands.first() {
-                        if let Some(&t) = block_map.get(name.as_str()) { edges.push(t); }
+                        if let Some(t) = resolve(name.as_str()) { edges.push(t); }
                     }
                 }
                 LirOpcode::Br => {
                     for op in &inst.operands {
                         if let LirOperand::Label(name) = op {
-                            if let Some(&t) = block_map.get(name.as_str()) { edges.push(t); }
+                            if let Some(t) = resolve(name.as_str()) { edges.push(t); }
                         }
                     }
                 }
                 _ => {}
             }
         }
-        if edges.is_empty() && bi + 1 < func.blocks.len() {
+        // Fall-through only applies when there is no explicit terminator.
+        let has_terminator = block.insts.iter().any(|i|
+            matches!(i.opcode, LirOpcode::Jmp | LirOpcode::Br | LirOpcode::Ret));
+        if !has_terminator && bi + 1 < func.blocks.len() {
             edges.push(func.blocks[bi + 1].id);
         }
     }

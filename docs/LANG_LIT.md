@@ -3,20 +3,19 @@
 **LitLang** adalah bahasa pemrograman alternatif yang jauh lebih sederhana dalam ekosistem Brak. Ia dirancang untuk mendemonstrasikan betapa mudahnya menambahkan dukungan bahasa baru ke dalam pipeline compiler Brak.
 
 ## Sintaks Sederhana
-Lit menggunakan gaya penulisan minimalis.
+Lit saat ini hanya mendukung fungsi konstanta — satu ekspresi literal per fungsi:
 
 ```lit
-// Definisi fungsi sederhana
-fn tambah(a: I32, b: I32) -> I32 {
-    let c: I32 = a + b;
-    c
-}
+fn versi() -> i32 = 42;
+fn salam() -> string = "Halo dari Lit";
+```
 
-// Fungsi utama
-fn main() -> I32 {
-    let x: I32 = 100;
-    tambah(x, 50)
-}
+Sintaks dengan body `{ ... }`, `let`, dan pemanggilan fungsi (contoh di bawah)
+belum didukung grammar Lit saat ini:
+
+```lit
+// BELUM DIDUKUNG — dokumentasi tujuan jangka panjang:
+// fn tambah(a: i32, b: i32) -> i32 { a + b }
 ```
 
 ## Perbedaan Utama dengan Brak
