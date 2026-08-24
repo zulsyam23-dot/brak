@@ -951,14 +951,31 @@ impl Parser {
             }
             TokenKind::Ident => {
                 let id = self.expect_ident(tokens, pos);
-                // Fase 7: `EnumName.Variant` variant pattern.
+                // Fase 7: `EnumName.Variant` / `EnumName.Variant(x, y)` —
+                // variant pattern with optional payload destructuring.
                 if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Dot)
                     && tokens.get(*pos + 1).map(|t| t.kind) == Some(TokenKind::Ident)
                 {
                     *pos += 1; // consume '.'
                     let variant = self.expect_ident(tokens, pos);
+                    let mut bindings = vec![];
+                    if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::LParen) {
+                        *pos += 1;
+                        if tokens.get(*pos).map(|t| t.kind) != Some(TokenKind::RParen) {
+                            loop {
+                                let b = self.expect_ident(tokens, pos);
+                                bindings.push(b);
+                                if tokens.get(*pos).map(|t| t.kind) == Some(TokenKind::Comma) {
+                                    *pos += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect_noerr(TokenKind::RParen, tokens, pos);
+                    }
                     let span = Span::new(id.span.start, variant.span.end);
-                    return Ok(Pattern::Variant { enum_name: id, variant, span });
+                    return Ok(Pattern::Variant { enum_name: id, variant, bindings, span });
                 }
                 Ok(Pattern::Ident(id))
             }

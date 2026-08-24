@@ -138,7 +138,13 @@ impl TypeChecker {
                         let literal_int = matches!(v.as_ref(), HirExpr::Int(..));
                         let unifies = val_ty == HirType::I32 && literal_int
                             && matches!(ty, HirType::I32 | HirType::I64);
-                        if val_ty != *ty && !unifies {
+                        // Integer-width differences between an annotated let
+                        // and its initializer are tolerated (slots are 64-bit
+                        // at runtime); mixing non-int types still errors.
+                        let int_widen = matches!(ty, HirType::I32 | HirType::I64)
+                            && matches!(val_ty, HirType::I32 | HirType::I64)
+                            && !literal_int;
+                        if val_ty != *ty && !unifies && !int_widen {
                             self.diags.push(
                                 Diagnostic::error(format!(
                                     "type mismatch: expected {ty}, got {val_ty}"
@@ -423,22 +429,39 @@ impl TypeChecker {
                 for (i, (pat, body)) in arms.iter().enumerate() {
                     // Variant patterns must reference an existing enum+variant
                     // whose type equals the scrutinee's (Fase 7).
-                    if let HirPattern::Variant { enum_name, variant } = pat {
-                        match self.enums.get(enum_name) {
+                    // Variant patterns must reference an existing enum+variant
+                    // whose type equals the scrutinee's (Fase 7). Bindings are
+                    // declared so the arm body can use them.
+                    if let HirPattern::Variant { enum_name, variant, bindings } = pat {
+                        match self.enums.get(enum_name).cloned() {
                             None => self.diags.push(
                                 Diagnostic::error(format!(
                                     "pattern `{enum_name}.{variant}`: undefined enum `{enum_name}`"
                                 )).with_span(*span)
                             ),
-                            Some(e) => {
-                                if e.variants.iter().all(|v| v.name != *variant) {
-                                    self.diags.push(
-                                        Diagnostic::error(format!(
-                                            "enum `{enum_name}` has no variant `{variant}`"
-                                        )).with_span(*span)
-                                    );
+                            Some(e) => match e.variants.iter().find(|v| v.name == *variant) {
+                                None => self.diags.push(
+                                    Diagnostic::error(format!(
+                                        "enum `{enum_name}` has no variant `{variant}`"
+                                    )).with_span(*span)
+                                ),
+                                Some(v) => {
+                                    // Payload destructuring arity check (Fase 7),
+                                    // then declare each binding with its field type.
+                                    let field_tys = v.fields.clone().unwrap_or_default();
+                                    if bindings.len() != field_tys.len() {
+                                        self.diags.push(
+                                            Diagnostic::error(format!(
+                                                "variant `{enum_name}.{variant}` has {nfields} payload field(s), pattern binds {n}",
+                                                nfields = field_tys.len(), n = bindings.len()
+                                            )).with_span(*span)
+                                        );
+                                    }
+                                    for (b, fty) in bindings.iter().zip(field_tys.iter()) {
+                                        self.declare_local(b, fty.clone());
+                                    }
                                 }
-                            }
+                            },
                         }
                         let pat_ty = HirType::Named(enum_name.clone());
                         if pat_ty != scrutinee_ty {
@@ -457,11 +480,20 @@ impl TypeChecker {
                     }
                     let body_ty = self.infer_expr(body);
                     if body_ty != arm0_ty {
-                        self.diags.push(
-                            Diagnostic::error(format!(
-                                "match arm {i} type mismatch: expected {arm0_ty}, got {body_ty}"
-                            )).with_span(*span)
-                        );
+                        // Untyped int literals adapt to the first arm's integer
+                        // type; int-width differences between arms are tolerated
+                        // (runtime slots are 64-bit).
+                        let lit_adapts = matches!(arms[i].1, HirExpr::Int(..))
+                            && matches!(arm0_ty, HirType::I32 | HirType::I64);
+                        let int_widen = matches!(body_ty, HirType::I32 | HirType::I64)
+                            && matches!(arm0_ty, HirType::I32 | HirType::I64);
+                        if !lit_adapts && !int_widen {
+                            self.diags.push(
+                                Diagnostic::error(format!(
+                                    "match arm {i} type mismatch: expected {arm0_ty}, got {body_ty}"
+                                )).with_span(*span)
+                            );
+                        }
                     }
                 }
                 arm0_ty
@@ -532,10 +564,11 @@ impl TypeChecker {
                     HirType::Void
                 }
             }
-            HirExpr::EnumInit { enum_name, variant, span } => {
-                // Fase 7: validate enum/variant exist and the variant carries
-                // no payload. The value is represented as the variant's tag.
-                match self.enums.get(enum_name) {
+            HirExpr::EnumInit { enum_name, variant, args, span } => {
+                // Fase 7: validate enum/variant exist; payload arity and types
+                // are checked against the variant declaration. The value is a
+                // pointer to [tag, payload...].
+                match self.enums.get(enum_name).cloned() {
                     None => {
                         self.diags.push(
                             Diagnostic::error(format!(
@@ -554,12 +587,28 @@ impl TypeChecker {
                             HirType::Void
                         }
                         Some(v) => {
-                            if v.fields.is_some() {
+                            let field_tys: Vec<HirType> = v.fields.clone().unwrap_or_default();
+                            if args.len() != field_tys.len() {
                                 self.diags.push(
                                     Diagnostic::error(format!(
-                                        "enum variant `{enum_name}.{variant}` has a payload — payload enums are not yet supported"
+                                        "variant `{enum_name}.{variant}` expects {} payload value(s), got {}",
+                                        field_tys.len(), args.len()
                                     )).with_span(*span)
                                 );
+                            }
+                            for (arg, fty) in args.iter().zip(field_tys.iter()) {
+                                let arg_ty = self.infer_expr(arg);
+                                // Untyped int literals unify with integer payload fields.
+                                let unifies = arg_ty == HirType::I32
+                                    && matches!(arg, HirExpr::Int(..))
+                                    && matches!(fty, HirType::I32 | HirType::I64);
+                                if arg_ty != *fty && !unifies {
+                                    self.diags.push(
+                                        Diagnostic::error(format!(
+                                            "payload type mismatch in `{enum_name}.{variant}`: expected {fty}, got {arg_ty}"
+                                        )).with_span(arg.span())
+                                    );
+                                }
                             }
                             HirType::Named(enum_name.clone())
                         }

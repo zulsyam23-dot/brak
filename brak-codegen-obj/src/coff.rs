@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::x86_64::*;
 use crate::codeview;
 use brak_ir_lir::lir::LirProgram;
@@ -117,6 +118,10 @@ fn build_symtab(program: &LirProgram, _strtab: &str, relocs: &[Reloc]) -> Result
     let mut str_off = 4u32;
     let mut text_off = 0u32;
 
+    let struct_fields: HashMap<String, Vec<String>> = program.structs.iter()
+        .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
+        .collect();
+
     let mut func_labels = std::collections::HashMap::new();
     let mut block_labels = std::collections::HashMap::new();
     let mut block_name_labels = std::collections::HashMap::new();
@@ -138,7 +143,7 @@ fn build_symtab(program: &LirProgram, _strtab: &str, relocs: &[Reloc]) -> Result
         buf.extend_from_slice(&entry);
 
         let mut dummy_lines = Vec::new();
-        let (code, _) = emit_function(func, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut dummy_lines)?;
+        let (code, _) = emit_function(func, &struct_fields, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut dummy_lines)?;
         text_off += code.len() as u32;
     }
 
@@ -203,3 +208,7 @@ fn find_symbol_index(symtab: &[u8], strtab: &str, name: &str) -> u32 {
     }
     0
 }
+
+
+
+

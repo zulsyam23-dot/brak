@@ -68,14 +68,13 @@ impl MirLower {
     fn enum_variant_tag(&self, enum_name: &str, variant: &str) -> Option<usize> {
         self.enum_tags.get(enum_name)?.iter().position(|v| v == variant)
     }
-
     /// The constant a pattern compares against, if any. `None` means
     /// catch-all (wildcard/binding) or non-comparable literal.
     fn pattern_discriminant(&self, pat: &HirPattern) -> Option<i64> {
         match pat {
             HirPattern::Literal(HirLiteral::Int(i)) => Some(*i),
             HirPattern::Literal(HirLiteral::Bool(b)) => Some(*b as i64),
-            HirPattern::Variant { enum_name, variant } => {
+            HirPattern::Variant { enum_name, variant, .. } => {
                 self.enum_variant_tag(enum_name, variant).map(|t| t as i64)
             }
             _ => None,
@@ -99,6 +98,17 @@ impl MirLower {
         }
         for item in program.items {
             match item {
+                HirItem::Enum(e) => {
+                    enums.push(MirEnum {
+                        name: e.name,
+                        variants: e.variants.into_iter().map(|v| MirVariant {
+                            name: v.name,
+                            fields: v.fields.map(|fs| fs.iter().map(lower_hir_type).collect()),
+                            span: v.span,
+                        }).collect(),
+                        span: e.span,
+                    });
+                }
                 HirItem::Function(f) => {
                     if let Ok(mf) = self.lower_function(f) {
                         functions.push(mf);
@@ -124,7 +134,6 @@ impl MirLower {
                         span: s.span,
                     });
                 }
-                HirItem::Enum(_) => {} // collected in the pre-pass below
                 HirItem::GlobalLet(_) => {}
             }
         }
@@ -766,16 +775,25 @@ impl MirLower {
             }
             HirExpr::Field { object, field, span } => {
                 let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
+                // Fase 7: resolve the object's struct name from its local type
+                // so backends can compute the field offset.
+                let struct_name = match self.locals.get(obj_id).map(|l| &l.ty) {
+                    Some(MirType::Named(n)) => n.clone(),
+                    _ => "unknown".to_string(),
+                };
+                // ponytail: field result typed I64 (runtime slots are 64-bit);
+                // per-field declared types flow through once struct metadata
+                // reaches MIR lowering.
                 let id = self.fresh_local();
                 self.locals.push(MirLocal {
                     name: format!("tmp_{id}"),
-                    ty: MirType::I32, // Simplified for now
+                    ty: MirType::I64,
                 });
                 insts.push(MirInst::Assign {
                     dest: id,
                     value: MirValue::GetField {
                         object: obj_id,
-                        name: "unknown".to_string(), // TODO: Get struct name
+                        name: struct_name,
                         field: field.clone(),
                     },
                     span: *span,
@@ -803,9 +821,11 @@ impl MirLower {
                 });
                 Ok(id)
             }
-            HirExpr::EnumInit { enum_name, variant, span } => {
-                // Fase 7: fieldless enum values are represented by their
-                // variant's tag index (0-based, declaration order).
+            HirExpr::EnumInit { enum_name, variant, args, span } => {
+                // Fase 7: an enum value is an aggregate `[tag, payload...]`
+                // built with StructInit over a synthetic per-enum struct
+                // (`__enum_<Name>`); backends that support aggregates
+                // allocate it, and match destructures via GetField.
                 let tag = self.enum_variant_tag(&enum_name, &variant)
                     .expect("typeck validated enum variant before MIR lowering");
                 let id = self.fresh_local();
@@ -813,9 +833,33 @@ impl MirLower {
                     name: format!("tmp_{id}"),
                     ty: MirType::Named(enum_name.clone()),
                 });
+
+                // Materialize the tag into a temp local.
+                let tag_local = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{tag_local}"),
+                    ty: MirType::I64,
+                });
+                insts.push(MirInst::Assign {
+                    dest: tag_local,
+                    value: MirValue::Int(tag as i64),
+                    span: *span,
+                });
+
+                let arg_ids: Vec<LocalId> = args.iter()
+                    .map(|a| self.emit_expr(a, insts, current_name, blocks))
+                    .collect::<Result<_, _>>()?;
+
+                let mut fields = vec![("$tag".to_string(), tag_local)];
+                for (i, a) in arg_ids.iter().enumerate() {
+                    fields.push((format!("${i}"), *a));
+                }
                 insts.push(MirInst::Assign {
                     dest: id,
-                    value: MirValue::Int(tag as i64),
+                    value: MirValue::StructInit {
+                        name: format!("__enum_{enum_name}"),
+                        fields,
+                    },
                     span: *span,
                 });
                 Ok(id)
@@ -823,6 +867,12 @@ impl MirLower {
             HirExpr::FieldAssign { object, field, value, span } => {
                 let obj_id = self.emit_expr(object, insts, current_name, blocks)?;
                 let val_id = self.emit_expr(value, insts, current_name, blocks)?;
+                // Fase 7: resolve the object's struct name so backends can
+                // compute the field offset (was impossible before).
+                let struct_name = match self.locals.get(obj_id).map(|l| &l.ty) {
+                    Some(MirType::Named(n)) => n.clone(),
+                    _ => "unknown".to_string(),
+                };
                 let id = self.fresh_local();
                 self.locals.push(MirLocal {
                     name: format!("tmp_{id}"),
@@ -832,6 +882,7 @@ impl MirLower {
                     dest: id,
                     value: MirValue::SetField {
                         object: obj_id,
+                        name: struct_name,
                         field: field.clone(),
                         value: val_id,
                     },
@@ -876,6 +927,35 @@ impl MirLower {
 
         let scrut_id = self.emit_expr(scrutinee, insts, current_name, blocks)?;
 
+        // Fase 7: if any arm matches an enum variant, the scrutinee holds a
+        // POINTER to [tag, payload...]; extract the tag once and compare
+        // against it instead of the pointer itself.
+        let enum_scrut: Option<LocalId> = {
+            let first_variant = arms.iter().find_map(|(p, _)| match p {
+                HirPattern::Variant { enum_name, .. } => Some(enum_name.clone()),
+                _ => None,
+            });
+            if let Some(enum_name) = first_variant {
+                let tag_local = self.fresh_local();
+                self.locals.push(MirLocal {
+                    name: format!("tmp_{tag_local}"),
+                    ty: MirType::I64,
+                });
+                insts.push(MirInst::Assign {
+                    dest: tag_local,
+                    value: MirValue::GetField {
+                        object: scrut_id,
+                        name: format!("__enum_{enum_name}"),
+                        field: "$tag".to_string(),
+                    },
+                    span,
+                });
+                Some(tag_local)
+            } else {
+                None
+            }
+        };
+
         // Fase 7: discriminants cover Int literals, Bool literals, AND enum
         // variant tags. First catch-all (wildcard/binding/other literal) ends
         // the comparable chain.
@@ -889,6 +969,37 @@ impl MirLower {
                 break;
             }
         }
+
+        // Fase 7: BINDINGS MUST BE DECLARED BEFORE BODIES ARE LOWERED — an arm
+        // body referencing its destructured variable would otherwise create
+        // uninitialized temporaries.
+        let arm_bind_insts: Vec<Vec<MirInst>> = arms.iter().take(eff_len).map(|(pat, _)| {
+            match pat {
+                HirPattern::Binding(name) => {
+                    let l = self.get_or_create_local(name, MirType::I64);
+                    // NOTE: value filled in later (needs scrut_id only).
+                    vec![MirInst::Assign { dest: l, value: MirValue::Local(scrut_id), span }]
+                }
+                HirPattern::Variant { enum_name, variant: _, bindings } => {
+                    let mut insts_v = vec![];
+                    for (i_payload, b) in bindings.iter().enumerate() {
+                        if b == "_" { continue; }
+                        let l = self.get_or_create_local(b, MirType::I64);
+                        insts_v.push(MirInst::Assign {
+                            dest: l,
+                            value: MirValue::GetField {
+                                object: scrut_id,
+                                name: format!("__enum_{enum_name}"),
+                                field: format!("${i_payload}"),
+                            },
+                            span,
+                        });
+                    }
+                    insts_v
+                }
+                _ => vec![],
+            }
+        }).collect();
 
         // Lower all effective arm bodies up-front into separate block vectors
         // (each numbered from 0) so layout offsets can be computed exactly.
@@ -959,7 +1070,9 @@ impl MirLower {
                                 dest: cond_local,
                                 value: MirValue::BinOp {
                                     op: MirBinOp::Eq,
-                                    lhs: scrut_id,
+                                    // Variant arms compare the extracted TAG,
+                                    // not the aggregate pointer.
+                                    lhs: enum_scrut.unwrap_or(scrut_id),
                                     rhs: pat_local,
                                 },
                                 span,
@@ -977,18 +1090,8 @@ impl MirLower {
                 }
             }
 
-            // Binding pattern: assign scrutinee to the bound name before the body.
-            let bind_insts: Vec<MirInst> = match &arms[i].0 {
-                HirPattern::Binding(name) => {
-                    let l = self.get_or_create_local(name, MirType::I32);
-                    vec![MirInst::Assign {
-                        dest: l,
-                        value: MirValue::Local(scrut_id),
-                        span,
-                    }]
-                }
-                _ => vec![],
-            };
+            // Binding patterns: prepend the pre-computed bind instructions.
+            let bind_insts = arm_bind_insts[i].clone();
 
             let mut set = std::mem::take(&mut body_block_sets[i]);
             remap_block_ids(&mut set, body_pos[i]);
@@ -1530,6 +1633,7 @@ mod tests {
         );
     }
 }
+
 
 
 

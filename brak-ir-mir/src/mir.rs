@@ -124,8 +124,18 @@ pub enum MirValue {
     },
     SetField {
         object: LocalId,
+        /// Struct name — needed by backends to resolve the field's offset
+        /// (Fase 7: was missing, making field offsets unresolvable).
+        name: String,
         field: String,
         value: LocalId,
+    },
+    /// Fase 7: enum construction. Fieldless variants have empty args; payload
+    /// variants carry one local per payload field.
+    EnumInit {
+        enum_name: String,
+        variant: String,
+        args: Vec<LocalId>,
     },
 }
 
@@ -243,8 +253,18 @@ impl ContentHash for MirValue {
                 }
                 h
             }
-            MirValue::SetField { object, field, value } => {
-                combine_hash(combine_hash(*object as u64, field.content_hash()), *value as u64)
+            MirValue::SetField { object, name, field, value } => {
+                let mut h = combine_hash(*object as u64, name.content_hash());
+                h = combine_hash(h, field.content_hash());
+                h = combine_hash(h, *value as u64);
+                h
+            }
+            MirValue::EnumInit { enum_name, variant, args } => {
+                let mut h = combine_hash(enum_name.content_hash(), variant.content_hash());
+                for a in args {
+                    h = combine_hash(h, *a as u64);
+                }
+                h
             }
         }
     }
@@ -340,7 +360,8 @@ impl std::fmt::Display for MirValue {
                 }
                 write!(f, " }}")
             }
-            MirValue::SetField { object, field, value } => write!(f, "%{object}.{field} = %{value}"),
+            MirValue::SetField { object, field, value, .. } => write!(f, "%{object}.{field} = %{value}"),
+            MirValue::EnumInit { enum_name, variant, .. } => write!(f, "{enum_name}.{variant}()"),
         }
     }
 }

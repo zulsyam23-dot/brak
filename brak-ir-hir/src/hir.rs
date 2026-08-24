@@ -164,10 +164,12 @@ pub enum HirExpr {
         span: Span,
     },
     /// Enum construction: `EnumName.Variant(...)` (Fase 7).
-    /// Fieldless variants ignore args; payload variants are not yet supported.
+    /// Fieldless variants have empty args; payload variants carry one
+    /// expression per payload field.
     EnumInit {
         enum_name: String,
         variant: String,
+        args: Vec<HirExpr>,
         span: Span,
     },
     FieldAssign {
@@ -189,7 +191,12 @@ pub enum HirPattern {
     /// literal pattern - compared against the scrutinee with Eq
     Literal(HirLiteral),
     /// `EnumName.Variant` - matches that enum variant's tag (Fase 7)
-    Variant { enum_name: String, variant: String },
+    Variant {
+        enum_name: String,
+        variant: String,
+        /// Payload destructuring bindings, in declaration order.
+        bindings: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -221,7 +228,7 @@ impl ContentHash for HirPattern {
             HirPattern::Wildcard => 1,
             HirPattern::Binding(s) => s.content_hash(),
             HirPattern::Literal(l) => l.content_hash(),
-            HirPattern::Variant { enum_name, variant } => {
+            HirPattern::Variant { enum_name, variant, .. } => {
                 combine_hash(enum_name.content_hash(), variant.content_hash())
             }
         }
@@ -291,8 +298,7 @@ impl std::fmt::Display for HirPattern {
             HirPattern::Wildcard => write!(f, "_"),
             HirPattern::Binding(s) => write!(f, "{s}"),
             HirPattern::Literal(l) => write!(f, "{l}"),
-            HirPattern::Variant { enum_name, variant } => write!(f, "{enum_name}.{variant}"),
-            HirPattern::Variant { enum_name, variant } => write!(f, "{enum_name}.{variant}"),
+            HirPattern::Variant { enum_name, variant, .. } => write!(f, "{enum_name}.{variant}"),
         }
     }
 }
@@ -675,3 +681,4 @@ impl std::fmt::Display for HirType {
         }
     }
 }
+

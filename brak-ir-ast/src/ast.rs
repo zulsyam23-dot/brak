@@ -243,10 +243,12 @@ pub enum Pattern {
     Ident(Ident),
     Literal(Expr),
     Wildcard(Span),
-    /// `EnumName.Variant` — matches that exact variant (fieldless enums).
+    /// `EnumName.Variant` — matches that exact variant; parenthesised idents
+    /// destructure payload fields into bindings (Fase 7).
     Variant {
         enum_name: Ident,
         variant: Ident,
+        bindings: Vec<Ident>,
         span: Span,
     },
 }
@@ -1003,3 +1005,4 @@ mod tests {
         assert_eq!(arm.pattern.to_string(), "42");
     }
 }
+

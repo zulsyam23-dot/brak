@@ -67,12 +67,11 @@ fn label(s: State) -> i32 {
 }
 ```
 
-- Konstruksi: `EnumName.Variant` atau `EnumName.Variant()`.
+- Konstruksi: `EnumName.Variant` atau `EnumName.Variant(arg, ...)`.
 - Match **wajib exhaustif**: jika tidak ada arm wildcard (`_`) atau binding,
   semua varian harus tercakup — compiler akan menolak program yang kurang.
-- Nilai enum direpresentasikan sebagai tag integer sesuai urutan deklarasi.
-- ⚠️ Enum dengan payload (`Ok(i32)`) bisa dideklarasikan tetapi konstruksi dan
-  destructuring payload belum didukung (butuh lapisan memory/aggregate).
+- Payload destructuring: `Shape.Circle(r) => r * r * 3`.
+- Nilai enum direpresentasikan sebagai pointer ke agregat stack `[tag, payload...]`.
 
 ### 4. Kontrol Alur
 

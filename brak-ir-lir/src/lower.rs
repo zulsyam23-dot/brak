@@ -54,10 +54,29 @@ impl LirLower {
     }
 
     pub fn lower(&mut self, program: MirProgram) -> LirProgram {
-        let structs = program.structs.iter().map(|s| LirStructMetadata {
+        let mut structs: Vec<LirStructMetadata> = program.structs.iter().map(|s| LirStructMetadata {
             name: s.name.clone(),
             fields: s.fields.iter().map(|f| (f.name.clone(), lower_mir_type_to_lir(&f.ty))).collect(),
         }).collect();
+
+        // Fase 7: synthesize aggregate metadata for enums used as
+        // `__enum_<Name>` structs — [tag, $0, $1, ...] with i64 words — so
+        // GetField/SetField offsets resolve in backends.
+        for e in &program.enums {
+            let max_payload = e.variants.iter()
+                .map(|v| v.fields.as_ref().map(|f| f.len()).unwrap_or(0))
+                .max().unwrap_or(0);
+            if max_payload > 0 || true {
+                let mut fields = vec![("$tag".to_string(), LirType::I64)];
+                for i in 0..max_payload {
+                    fields.push((format!("${i}"), LirType::I64));
+                }
+                structs.push(LirStructMetadata {
+                    name: format!("__enum_{}", e.name),
+                    fields,
+                });
+            }
+        }
 
         let enums = program.enums.iter().map(|e| LirEnumMetadata {
             name: e.name.clone(),
@@ -329,12 +348,15 @@ impl LirLower {
                     );
                 }
             }
-            MirValue::GetField { object, name: _, field } => {
+            MirValue::GetField { object, name, field } => {
                 insts.push(
                     LirInst::new(LirOpcode::GetField)
                         .with_dest(*dest)
                         .with_op(LirOperand::Reg(*object))
                         .with_op(LirOperand::Field(field.clone()))
+                        // Fase 7: struct identity travels with the instruction
+                        // so backends can resolve field offsets.
+                        .with_op(LirOperand::Label(name.clone()))
                         .with_debug(span),
                 );
             }
@@ -349,13 +371,17 @@ impl LirLower {
                 }
                 insts.push(lir);
             }
-            MirValue::SetField { object, field, value } => {
+            // The MIR builder lowers EnumInit to StructInit over a synthetic
+            // `__enum_<Name>` aggregate before it ever reaches LIR.
+            MirValue::EnumInit { .. } => unreachable!("EnumInit must be lowered to StructInit in MIR"),
+            MirValue::SetField { object, name, field, value } => {
                 insts.push(
                     LirInst::new(LirOpcode::SetField)
                         .with_dest(*dest)
                         .with_op(LirOperand::Reg(*object))
                         .with_op(LirOperand::Field(field.clone()))
                         .with_op(LirOperand::Reg(*value))
+                        .with_op(LirOperand::Label(name.clone()))
                         .with_debug(span),
                 );
             }

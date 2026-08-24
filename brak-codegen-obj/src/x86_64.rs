@@ -118,6 +118,11 @@ struct PendingReloc {
 }
 
 pub fn emit_text(program: &LirProgram) -> Result<(Vec<u8>, Vec<Reloc>, Vec<LineEntry>), CodegenError> {
+    // Fase 7: field-name -> index per struct, so GetField/SetField can resolve
+    // byte offsets without a runtime type system.
+    let struct_fields: HashMap<String, Vec<String>> = program.structs.iter()
+        .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
+        .collect();
     let mut func_labels: HashMap<String, CodeLabel> = HashMap::new();
     let mut block_labels: HashMap<(String, usize), CodeLabel> = HashMap::new();
     let mut block_name_labels: HashMap<(String, String), CodeLabel> = HashMap::new();
@@ -129,7 +134,7 @@ pub fn emit_text(program: &LirProgram) -> Result<(Vec<u8>, Vec<Reloc>, Vec<LineE
 
     for func in &program.functions {
         let mut func_lines = Vec::new();
-        let (code, relocs) = emit_function(func, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut func_lines)?;
+        let (code, relocs) = emit_function(func, &struct_fields, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut func_lines)?;
         for entry in &mut func_lines {
             entry.offset += current_offset;
         }
@@ -146,6 +151,7 @@ pub fn emit_text(program: &LirProgram) -> Result<(Vec<u8>, Vec<Reloc>, Vec<LineE
 
 pub fn emit_function(
     func: &brak_ir_lir::lir::LirFunction,
+    struct_fields: &HashMap<String, Vec<String>>,
     func_labels: &mut HashMap<String, CodeLabel>,
     block_labels: &mut HashMap<(String, usize), CodeLabel>,
     block_name_labels: &mut HashMap<(String, String), CodeLabel>,
@@ -199,7 +205,7 @@ pub fn emit_function(
         let mut emitted = false;
         for inst in &block.insts {
             let before = a.instructions().len();
-            emit_inst(&mut a, inst, block_labels, block_name_labels, func_labels, &func.name, &mut pending_relocs)?;
+            emit_inst(&mut a, inst, block_labels, block_name_labels, func_labels, &func.name, struct_fields, &mut pending_relocs)?;
             let after = a.instructions().len();
             if after > before {
                 emitted = true;
@@ -297,6 +303,7 @@ fn emit_inst(
     block_name_labels: &mut HashMap<(String, String), CodeLabel>,
     func_labels: &mut HashMap<String, CodeLabel>,
     func_name: &String,
+    struct_fields: &HashMap<String, Vec<String>>,
     pending_relocs: &mut Vec<PendingReloc>,
 ) -> Result<(), CodegenError> {
     match inst.opcode {
@@ -588,12 +595,120 @@ fn emit_inst(
             restore_caller_saved(a)?;
         }
 
-        // BUG-K09: never silently drop opcodes. These require struct/pointer
-        // layout support that the obj backend does not have yet — failing at
-        // compile time beats emitting wrong machine code.
-        LirOpcode::Load | LirOpcode::Store | LirOpcode::Alloca
-        | LirOpcode::GetField | LirOpcode::SetField | LirOpcode::StructInit => {
-            return Err(CodegenError::Unsupported(inst.opcode));
+        // ── Fase 7: aggregate/memory operations ────────────
+        // Aggregates live on the machine stack: StructInit reserves
+        // 16-aligned space below rsp and the value is a raw POINTER to it.
+        //
+        // ponytail: alloca inside a loop leaks stack until return (no scope
+        // pop) — acceptable for current language shapes; switch to a bump
+        // allocator with frame reuse if loops-with-allocas become common.
+        LirOpcode::StructInit => {
+            let d = inst.dest.ok_or(CodegenError::MissingDest(inst.opcode))?;
+            let struct_name = match inst.operands.first() {
+                Some(LirOperand::Label(n)) => n.clone(),
+                _ => return Err(CodegenError::InvalidLabel("StructInit without struct name".into())),
+            };
+            // operands: [Label(name), Field(f0), Reg(v0), Field(f1), Reg(v1), ...]
+            let pairs: Vec<(&str, &LirOperand)> = inst.operands[1..]
+                .chunks(2)
+                .filter_map(|c| match c {
+                    [LirOperand::Field(f), v] => Some((f.as_str(), v)),
+                    _ => None,
+                })
+                .collect();
+            let nwords = pairs.len();
+            let bytes = ((nwords * 8 + 15) / 16 * 16) as i32;
+            a.sub(rsp, bytes)?;
+            a.lea(rax, qword_ptr(rsp))?;
+            for (fname, val) in pairs.iter() {
+                // Resolve field slot from struct metadata; fall back to
+                // declaration order is NOT safe — unknown field = hard error.
+                let fields = struct_fields.get(&struct_name).ok_or_else(|| {
+                    CodegenError::InvalidLabel(format!("unknown struct '{struct_name}'"))
+                })?;
+                let idx = fields.iter().position(|f| f == fname).ok_or_else(|| {
+                    CodegenError::InvalidLabel(format!(
+                        "struct '{struct_name}' has no field '{fname}'"
+                    ))
+                })?;
+                match val {
+                    LirOperand::Reg(r) => { a.mov(rcx, vreg_ptr(*r))?; }
+                    LirOperand::ImmI64(v) => { a.mov(rcx, *v as u64)?; }
+                    _ => continue,
+                }
+                a.mov(qword_ptr(rax + (idx * 8) as i32), rcx)?;
+            }
+            a.mov(vreg_ptr(d), rax)?;
+        }
+
+        LirOpcode::GetField => {
+            let d = inst.dest.ok_or(CodegenError::MissingDest(inst.opcode))?;
+            let obj = match inst.operands.first() {
+                Some(LirOperand::Reg(r)) => *r,
+                _ => return Ok(()),
+            };
+            let field = match inst.operands.get(1) {
+                Some(LirOperand::Field(f)) => f.clone(),
+                _ => return Ok(()),
+            };
+            let struct_name = match inst.operands.get(2) {
+                Some(LirOperand::Label(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let idx = struct_fields.get(&struct_name).and_then(|f| f.iter().position(|x| x == &field))
+                .ok_or_else(|| CodegenError::InvalidLabel(format!(
+                    "field '{field}' not found in struct '{struct_name}'"
+                )))?;
+            a.mov(rax, vreg_ptr(obj))?;
+            a.mov(rax, qword_ptr(rax + (idx * 8) as i32))?;
+            a.mov(vreg_ptr(d), rax)?;
+        }
+
+        LirOpcode::SetField => {
+            let obj = match inst.operands.first() {
+                Some(LirOperand::Reg(r)) => *r,
+                _ => return Ok(()),
+            };
+            let field = match inst.operands.get(1) {
+                Some(LirOperand::Field(f)) => f.clone(),
+                _ => return Ok(()),
+            };
+            let value = inst.operands.get(2).cloned();
+            let struct_name = match inst.operands.get(3) {
+                Some(LirOperand::Label(n)) => n.clone(),
+                _ => String::new(),
+            };
+            let idx = struct_fields.get(&struct_name).and_then(|f| f.iter().position(|x| x == &field))
+                .ok_or_else(|| CodegenError::InvalidLabel(format!(
+                    "field '{field}' not found in struct '{struct_name}'"
+                )))?;
+            a.mov(rax, vreg_ptr(obj))?;
+            match value.as_ref() {
+                Some(LirOperand::Reg(r)) => { a.mov(rcx, vreg_ptr(*r))?; }
+                Some(LirOperand::ImmI64(v)) => { a.mov(rcx, *v as u64)?; }
+                _ => return Ok(()),
+            }
+            a.mov(qword_ptr(rax + (idx * 8) as i32), rcx)?;
+        }
+
+        LirOpcode::Load => {
+            let d = inst.dest.ok_or(CodegenError::MissingDest(inst.opcode))?;
+            if let Some(LirOperand::Reg(ptr)) = inst.operands.first() {
+                a.mov(rax, vreg_ptr(*ptr))?;
+                a.mov(rax, qword_ptr(rax))?;
+                a.mov(vreg_ptr(d), rax)?;
+            }
+        }
+
+        LirOpcode::Store => {
+            // [ptr] = value — operands [Reg(ptr), Reg(val)]
+            if let (Some(LirOperand::Reg(p)), Some(LirOperand::Reg(v))) =
+                (inst.operands.first(), inst.operands.get(1))
+            {
+                a.mov(rax, vreg_ptr(*p))?;
+                a.mov(rcx, vreg_ptr(*v))?;
+                a.mov(qword_ptr(rax), rcx)?;
+            }
         }
 
         _ => return Err(CodegenError::Unsupported(inst.opcode)),

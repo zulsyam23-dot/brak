@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use brak_ir_lir::lir::LirProgram;
 use crate::x86_64::*;
 
@@ -341,6 +342,10 @@ fn build_symtab(program: &LirProgram, strtab: &str, relocs: &[Reloc]) -> Result<
     let mut entries = vec![[0u8; 24]; 1]; // Null symbol
     let mut text_off = 0u64;
 
+    let struct_fields: HashMap<String, Vec<String>> = program.structs.iter()
+        .map(|s| (s.name.clone(), s.fields.iter().map(|(n, _)| n.clone()).collect()))
+        .collect();
+
     let mut func_labels = std::collections::HashMap::new();
     let mut block_labels = std::collections::HashMap::new();
     let mut block_name_labels = std::collections::HashMap::new();
@@ -356,7 +361,7 @@ fn build_symtab(program: &LirProgram, strtab: &str, relocs: &[Reloc]) -> Result<
         entries.push(entry);
 
         let mut dummy_lines = Vec::new();
-        let (code, _) = emit_function(func, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut dummy_lines)?;
+        let (code, _) = emit_function(func, &struct_fields, &mut func_labels, &mut block_labels, &mut block_name_labels, &mut dummy_lines)?;
         text_off += code.len() as u64;
     }
 
@@ -419,4 +424,8 @@ fn read_str(data: &[u8], off: usize) -> String {
     }
     String::from_utf8_lossy(&data[off..end]).to_string()
 }
+
+
+
+
 
