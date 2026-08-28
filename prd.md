@@ -1,5 +1,11 @@
 # PRD: Brak — Language Construction Toolkit
 
+> **Status dokumen**: disinkronkan dengan `prioritas.md` (bukan hanya aspirasi).
+> - `prioritas.md` = sumber kebenaran status bug/fitur & roadmap per fase.
+> - `daftar_api.md` = daftar API nyata yang ada sekarang + cara pakai.
+> - Bagian yang ditandai **📦 SUDAH ADA** benar-benar diimplementasi.
+> - Bagian yang ditandai **🚧 BACKLOG/RENCANA** belum ada di kode — jangan dianggap nyata.
+
 ## 1. Vision
 
 Brak adalah library toolkit untuk membangun bahasa pemrograman yang *fully standalone*. Terinspirasi dari arsitektur LLVM namun dirancang ulang agar **100% modular**, **eksternal**, dan **language-agnostic**. Setiap komponen adalah crate Rust independen yang bisa digunakan, diganti, atau ditulis ulang tanpa mengganggu komponen lain.
@@ -8,7 +14,7 @@ Brak adalah library toolkit untuk membangun bahasa pemrograman yang *fully stand
 
 - **"Everything is a plugin"** — kompiler bukan monolit, tapi rangkaian komponen yang saling berkomunikasi lewat IR.
 - **"Build piece by piece"** — kamu tidak perlu semua komponen untuk memulai. Cukup lexer + parser sudah bisa jalan.
-- **"Polyglot by design"** — library inti Rust, binding resmi untuk C, Python, JavaScript/ WASM, dan Zig.
+- **"Polyglot by design"** — library inti Rust. Binding nyata: C headers (`--gen-h`) & Python PyO3 (`--py-module`) via `brak-polyglot`. Binding JS/WASM & Zig 🚧 rencana (belum ada).
 
 ---
 
@@ -20,14 +26,14 @@ Sebelum membahas arsitektur, berikut masalah konkret di ekosistem compiler yang 
 |---|--------|--------|-------------|
 | 1 | **LLVM terlalu berat** — 50MB+ dependensi, 30 menit compile | Developer bahasa kecil enggan pakai compiler toolkit | `brak-core` + `brak-codegen-obj` hanya ~500KB, compile < 5 detik |
 | 2 | **FFI antar bahasa itu painful** — butuh C header, ABI mapping, marshaling kode | Isolasi ekosistem, sulit integrasi | IR-level FFI: 2 bahasa via Brak bisa call langsung tanpa glue code |
-| 3 | **IR tidak human-readable** — LLVM IR padat, WASM binary, tidak bisa di-diff | Debugging compiler sulit, test susah | Brak IR = JSON/YAML/MessagePack default, bisa diff, patch, grep |
-| 4 | **Compiler testing itu ad-hoc** — tiap project reinvent test infra | Banyak bug compiler tidak terdeteksi | `brak-test`: snapshot testing, differential fuzzing, IR diffing built-in |
-| 5 | **Grammar terputus dari compiler** — ANTLR grammar ≠ IR types | Double maintenance, mismatch | `brak-syntax`: satu grammar → parser + IR types + formatter + LSP rules |
+| 3 | **IR tidak human-readable** — LLVM IR padat, WASM binary, tidak bisa di-diff | Debugging compiler sulit, test susah | Brak IR = JSON/YAML (via `emit-ir --format`), bisa diff, patch, grep |
+| 4 | **Compiler testing itu ad-hoc** — tiap project reinvent test infra | Banyak bug compiler tidak terdeteksi | `brak-test` 📦: snapshot testing, diagnostic testing, execution & differential testing (initial). Fuzzing = 🚧 |
+| 5 | **Grammar terputus dari compiler** — ANTLR grammar ≠ IR types | Double maintenance, mismatch | `brak-syntax` 🚧 **rencana** — satu grammar → parser + IR types + formatter + LSP rules (belum ada di kode) |
 | 6 | **Pipeline build butuh external tools** — assembler, linker, runtime | Setup complex, cross-compile susah | `brak-codegen-obj` + `brak-link-native` → executable tanpa tool eksternal |
 | 7 | **Cross-compilation butuh toolchain raksasa** — sysroot, linker terpisah | Developer kecil tidak bisa cross-compile | `brak-link-native` output PE/ELF/Mach-O dari host mana pun |
-| 8 | **Incremental compilation afterthought** — kebanyakan toolkit tidak punya | Build lambat untuk project besar | IR node content hashing built-in, cache persistent, auto-incremental |
+| 8 | **Incremental compilation afterthought** — kebanyakan toolkit tidak punya | Build lambat untuk project besar | IR node content hashing built-in (trait `ContentHash`). Cache persisten = `brak-bitcode` 🚧 **eksperimental**, belum terintegrasi |
 | 9 | **Optimization pass susah ditulis** — LLVM pass butuh ribuan line boilerplate | Hanya expert bisa buat optimasi | Pass = simple Rust trait `fn run(&self, ir: IrLir) -> Result<IrLir>` |
-| 10 | **Debug info generation bolted-on** — metadata complex, mudah salah | Debugging user program sulit | First-class `DebugLoc` di LIR, semua backend otomatis generate DWARF/PDB |
+| 10 | **Debug info generation bolted-on** — metadata complex, mudah salah | Debugging user program sulit | `DebugLoc` first-class di LIR 📦. Generasi DWARF/CodeView di codegen-obj + linker 🚧 **sebagian & belum terverifikasi penuh** (lihat prioritas.md Fase 6 backlog) |
 
 ---
 
@@ -121,45 +127,43 @@ Source → [Lexer] → Tokens → [Parser] → IrAst
 
 ### 4.1 `brak-core` — Tipe dasar, error, Span, SourceMap
 
-Kernel terkecil. Semua crate lain depend ke sini.
+Kernel terkecil. Semua crate lain depend ke sini. 📦
 
-- `Span`, `SourceLoc`, `SourceMap`
-- `Diagnostic`, `ErrorKind`, `Result<T>`
-- `Version`, `Platform` detection
-- Trait definitions: `Lexer`, `Parser`, `Pass`, `CodegenBackend`
-- `ContentHash` — trait untuk hashing IR node (dasar incremental compilation)
-- `DebugLoc` — source location yang first-class di semua IR level
+- `Span`, `SourceLoc`, `SourceMap`, `DUMMY_SPAN`
+- `Diagnostic`, `Diagnostics`, `Severity`, `Result<T>`
+- `Version` (+ `BRAK_VERSION`)
+- `ContentHash` — trait hashing IR node (dasar incremental compilation)
+- Catatan: `Platform` detection & trait `Lexer/Parser/Pass/CodegenBackend` di core **tidak ada** — trait lexer ada di `brak-frontend`, codegen di `brak-codegen-traits`, opt di `brak-opt-traits`.
 
 ### 4.2 `brak-frontend` — Lexer & Parser
 
 Framework untuk membangun lexer/parser. Menyediakan:
 
-- `BrakLexer` — trait + built-in lexer (ASCII, UTF-8)
-- `BrakParser` — recursive descent / Pratt parser framework
-- Error recovery built-in
-- Stream input (file, string, incremental)
-- **Parser combinator API** — mirip `nom` tapi terintegrasi dengan `Span` dan `Diagnostic`
-- **Tree-sitter integration** — bisa parse pakai Tree-sitter grammar → AST
+- `BrakLexer` — trait + built-in lexer (ASCII): `AsciiLexer`
+- `BrakParser` — recursive descent: `Parser` (Pratt-style precedence)
+- Error recovery built-in (parser collect ke `Diagnostics`)
+- Stream input (file, string) via `SourceMap`
+- 🚧 **Parser combinator API** (mirip `nom`), **tree-sitter integration**, dan **`DebugLoc` di Span** — belum ada di kode
 
 ### 4.3 `brak-ir` — Intermediate Representation (4 levels)
 
 #### `brak-ir-ast` — AST setelah parsing
 - Tree struktural, persis seperti source
-- `Serialize` + `Deserialize` via serde (JSON/YAML/MessagePack)
+- `Serialize` + `Deserialize` via serde (**`serde_json`**; YAML/MessagePack 🚧 belum ada)
 - `ContentHash` setiap node → untuk incremental cache
 
 #### `brak-ir-hir` — High-level IR
 - Desugared: `for` → `loop`, pattern matching → match tree
 - Type-checked, name-resolved
 - `HirItem`, `HirExpr`, `HirPat`, `HirTy`
-- **Name resolution** built-in — scope tree, shadowing, hygiene
+- **Name resolution** via `ScopeStack` (shadowing & out-of-scope terdeteksi). Hygiene 🚧
 
 #### `brak-ir-mir` — Mid-level IR
 - Control-flow graph (CFG)
 - Basic blocks, terminators
 - `MirBlock`, `MirInst`, `MirValue`
 - No nested expressions — flat list of instructions
-- **SSA form** with phi nodes (opsional, bisa non-SSA)
+- 🚧 **SSA form with phi nodes** — belum ada
 - **Content hashing** per block → hanya compile block yang berubah
 
 #### `brak-ir-lir` — Low-level IR
@@ -172,120 +176,114 @@ Framework untuk membangun lexer/parser. Menyediakan:
 
 ### 4.4 `brak-opt` — Optimization Framework
 
-- `brak-opt-traits` — trait `OptimizationPass`
-- Passes sebagai crate terpisah:
-  - `brak-opt-dce` — Dead Code Elimination
-  - `brak-opt-cp` — Constant Propagation
+- `brak-opt-traits` — trait `LirOptimizationPass` + `PassManager`
+- Passes sebagai crate terpisah (semuanya 📦):
+  - `brak-opt-fold` — Constant Folding
+  - `brak-opt-cp` — Constant Propagation (path-sensitive, lattice)
   - `brak-opt-gvn` — Global Value Numbering
   - `brak-opt-inline` — Inlining
-  - `brak-opt-lcssa` — Loop-closed SSA form
-  - `brak-opt-sroa` — Scalar Replacement of Aggregates
   - `brak-opt-licm` — Loop Invariant Code Motion
-- **Pass Manager**: urutan eksekusi pass dikonfigurasi user via TOML
-- **Custom pass**: cukup implement trait, register ke pass manager
+  - `brak-opt-jt` — Jump Threading
+  - `brak-opt-tco` — Tail Call Optimization (self tail-call → loop)
+  - `brak-opt-dce` — Dead Code Elimination
+  - `brak-opt-utils` — CFG builder, Dominance, Natural Loops (dipakai pass)
+  - 🚧 `brak-opt-lcssa`, `brak-opt-sroa` — belum ada sebagai crate
+- **Pass Manager** 🚧: urutan pass dikonfigurasi **di kode** (bukan TOML) via `add_pass`
+- **Custom pass**: cukup implement trait, daftarkan lewat `add_pass` atau plugin dinamis `load_external_pass`
 
 ```rust
-pub trait OptimizationPass: Send + Sync {
+pub trait LirOptimizationPass: Send + Sync {
     fn name(&self) -> &'static str;
-    fn run(&self, ir: &mut ModuleLir) -> Result<Vec<OptimizationResult>>;
+    fn run(&self, program: LirProgram) -> Result<LirProgram>;
 }
 ```
 
 ### 4.5 `brak-codegen` — Backend
 
-- `brak-codegen-traits` — trait `CodegenBackend`
-- Backend default:
-  - `brak-codegen-asm`: cetak Lir → teks assembly (Intel/AT&T)
+- `brak-codegen-traits` — trait `CodegenBackend` + `CodegenExecutable`
+- Backend default (backend utama = `brak-codegen-obj`):
+  - `brak-codegen-asm`: cetak Lir → teks assembly (Intel). ⚠️ **tidak dipakai pipeline** (non-consumer)
   - `brak-codegen-obj`: Lir → binary object file langsung (no external assembler)
-    - **ELF** untuk Linux/Unix ✅ (all opcodes via `iced-x86`, proper header layout)
-    - **PE (Portable Executable)** untuk Windows
+    - **ELF** untuk Linux/Unix (via `iced-x86`)
+    - **PE (Portable Executable)** untuk Windows (COFF + CodeView)
     - **Mach-O** untuk macOS
-  - `brak-codegen-llvm`: Lir → LLVM IR → optimize via LLVM (opsional, heavy)
-  - `brak-codegen-c`: Lir → C source readable, idiomatic (portability fallback)
-  - `brak-codegen-wasm`: Lir → WASM bytecode
-- **DebugInfo generation** otomatis di semua backend
+    - Opcode yang belum didukung → error eksplisit (bukan silent)
+  - `brak-codegen-llvm`: Lir → LLVM IR (opsional, heavy)
+  - `brak-codegen-c`: Lir → C source readable (portability fallback)
+  - `brak-codegen-wasm`: Lir → **WAT text**, bukan binary `.wasm`
+- **DebugInfo** 🚧 sebagian: DWARF/CodeView ada di codegen-obj & linker tapi belum matang/terverifikasi penuh
 
 ### 4.6 `brak-link` — Linker
 
-- `brak-link-traits` — trait `LinkerBackend`
-- `brak-link-native` — linker untuk PE (Windows), ELF (Linux), Mach-O (macOS)
+- `brak-link-traits` — trait `LinkerBackend`, struct `ObjectFile` & `LinkerOutput`
+- `brak-link-native` — linker untuk PE (Windows, exe **dan** DLL), ELF (Linux exe; ELF DYN 🚧), Mach-O (macOS)
 - `brak-link-wasm` — linker WASM
-- `brak-link-archive` — static library creator (.a / .lib)
+- `brak-link-archive` — static library creator + parser (.a / .lib; input archive dipakai CLI)
 - **No external linker needed** — Brak punya linker sendiri dari awal
-- **LTO (Link-Time Optimization)** — di level LIR, bukan object file
+- **LTO (Link-Time Optimization)** 🚧 — belum ada; optimasi berjalan di level LIR sebelum codegen
 
-### 4.7 `brak-ffi` — Foreign Function Interface
+### 4.7 `brak-polyglot` — FFI (bukan `brak-ffi-*`)
 
-Bindings ke bahasa lain via C ABI:
+Realita: FFI diimplementasi lewat **`brak-polyglot`**, bukan crate `brak-ffi-*` terpisah.
+Crate `brak-ffi-c/python/wasm/zig` **belum ada**.
 
-- `brak-ffi-c` — C header + shared library
-- `brak-ffi-python` — Python binding via PyO3
-- `brak-ffi-wasm` — WASM package
-- `brak-ffi-zig` — Zig binding
-- **Stable ABI guarantee** — v1.0 → v2.0 tidak break binary compatibility
+- `PolyglotBridge` — normalisasi tipe (Brak ↔ C) + `extract_bindings` dari HIR
+- `CHeaderGenerator` — generate C header
+- `PyO3Generator` — generate proyek Python extension (PyO3) yang siap `maturin develop`
+- Binding WASM/Zig 🚧
+- **Stable ABI guarantee** 🚧 — klaim belum bisa divalidasi (belum ada komitmen ABI lintas versi)
 
 ### 4.8 `brak-tool` — CLI
 
-- `brak` command line (mirip `clang` or `llc`)
-- Subcommands: `build`, `run`, `emit-ir`, `opt`, `link`, `asm`
-- `brak.config.toml` loading
-- **Multi-language support**: `brak build --lang mylang file.src`
-- **IR inspection**: `brak emit-ir file.brak --level hir --format json`
+- `brak` command line
+- Subcommands nyata: **`build`** dan **`emit-ir`**. `run`, `opt`, `link`, `asm` 🚧 belum ada
+- `brak.config.toml` loading 🚧 belum ada
+- **Multi-language support**: via ekstensi file — `.brk` (Brak) dan `.lit` (Lit). Flag `--lang` 🚧 belum ada
+- **IR inspection**: `brak emit-ir file.brak --level hir --format json` 📦
+- Build: `--entry`, `--output`, `--shared` (DLL), `--gen-h`, `--py-module`, `--opt-pass`, `--opt-iterations`, `--verbose-opt`
 
-### 4.9 `brak-syntax` — Definisi Syntax (opsional)
+### 4.9 `brak-syntax` — Definisi Syntax (opsional) 🚧 BELUM ADA
 
-Framework untuk mendefinisikan grammar secara deklaratif:
+Framework untuk mendefinisikan grammar secara deklaratif (rencana):
 
 - `brak-syntax-ebnf` — EBNF parser → AST grammar
 - **AST types generator** — dari grammar langsung generate Rust types untuk IR
 - **Formatter generator** — dari grammar + formatting rules
 - **LSP query generator** — Tree-sitter queries untuk syntax highlighting
-- Atau integrasi dengan `logos` / `lalrpop` / `pest`
 
 ### 4.10 `brak-test` — Compiler Testing Framework
 
-**Ini komponen unik yang tidak dimiliki LLVM atau toolkit lain secara built-in.**
+Fitur yang sudah ada (semua Rust API, bukan Python):
 
-- **IR Snapshot Testing**: setiap level IR bisa di-snapshot dan di-diff
-- **FileCheck-style matching**: pola matching untuk IR output
-- **Differential Fuzzing**: compile program yang sama ke multiple backend, bandingkan hasil
-- **Diagnostic Testing**: assert error message, warning, note pada posisi tertentu
-- **Regression Database**: simpan IR yang pernah buggy, auto-test tiap rilis
-
-```python
-# Contoh: test case dalam Python
-@brak_test.snapshot("tests/snapshots/")
-def test_loop_desugar():
-    ir = compile("""
-        for i in 0..10 {
-            print(i);
-        }
-    """)
-    # Hir snapshot akan auto-compare dengan file tersimpan
-    return ir.hir
-```
+- **IR Snapshot Testing**: `SnapshotTester::assert_snapshot(name, &ir)` — compare dengan file tersimpan, update via `update: true`
+- **Diagnostic Testing**: `DiagnosticTester::assert_has_error` / `assert_has_warning`
+- **Execution & Differential Testing (initial)**: `ExecutionTester::assert_output(exe, expected)`
+- 🚧 **FileCheck-style matching**, **Differential Fuzzing**, **Regression Database** — belum ada
 
 ### 4.11 `brak-polyglot` — Polyglot FFI Framework
 
-**Ini fitur paling unik dan disruptive dari Brak.**
+FFI nyata untuk memanggil fungsi Brak dari bahasa lain:
 
-Brak menyediakan sistem FFI universal yang memungkinkan bahasa berbeda saling memanggil TANPA glue code. Caranya:
-
-1. Setiap bahasa yang dibangun dengan Brak mengekspor type definition ke Brak IR
-2. Brak IR punya type system standar: `Int`, `Float`, `Ptr`, `Struct`, `Func`, `Array`
-3. Linker otomatis resolve cross-language calls di level LIR
+1. Fungsi publik diekstrak dari HIR (`PolyglotBridge::extract_bindings`)
+2. Tipe dinormalisasi (`brak_to_c`, `hir_to_c`, `c_to_brak`)
+3. Generator menghasilkan **C header** (`CHeaderGenerator`) atau **proyek PyO3** (`PyO3Generator`)
 
 ```rust
-// Bahasa A (Rust-like)
-fn hello() -> i32 { 42 }
-
-// Bahasa B (Python-like) — langsung panggil hello()
-// compile by Brak, both in same binary
-let x = hello();  // 42
-// zero FFI overhead — direct call via LIR
+// lib.brk — fungsi Brak yang diekstrak menjadi binding
+fn add(a: i32, b: i32) -> i32 { a + b }
 ```
 
-Teknis: Brak polyglot bekerja dengan normalisasi calling convention di level LIR, bukan via C ABI. Hasilnya: performance native, zero marshaling, type-safe.
+Pemakaian via CLI:
+```bash
+brak build lib.brk --gen-h lib.h --shared   # header C + DLL
+brak build lib.brk --py-module liblib -o py_liblib/   # proyek Python
+# lalu: cd py_liblib && maturin develop → import liblib
+```
+
+Realita: cross-language call **di dalam satu binary** (`.brk` ↔ `.lit`) bekerja lewat IR
+perantara yang sama (contoh `samples/cross_lit.brk`). Normalisasi calling convention
+**di level LIR untuk pemanggilan antar bahasa brak**, sedangkan keluar ke C/Python
+via C ABI (Win64/SystemV) + header.
 
 ---
 
@@ -312,7 +310,7 @@ source.brk  ──►  brak  ──►  output.exe
 
 LLVM IR: `%1 = add i32 %0, 1` — padat, tidak bisa di-diff dengan baik.
 
-Brak IR (format JSON):
+Brak IR (format JSON, contoh disederhanakan — struktur nyata lihat `emit-ir --format json` di `daftar_api.md`):
 ```json
 {
   "op": "Add",
@@ -337,9 +335,9 @@ Atau YAML:
 - Bisa diedit manual untuk testing
 - Bisa diparse oleh tool eksternal (Python, JS, dll)
 
-### 5.3 Grammar-to-Everything Pipeline
+### 5.3 Grammar-to-Everything Pipeline 🚧 BELUM ADA
 
-Satu definisi grammar → generate semua yang kamu butuh:
+Rencana: satu definisi grammar → generate semua yang kamu butuh:
 
 ```
 grammar.ebnf
@@ -351,23 +349,17 @@ grammar.ebnf
   └── docs.md          (language documentation)
 ```
 
-**Dampak**: 80% boilerplate compiler development hilang. Fokus ke semantic dan optimization.
+Butuh `brak-syntax` (lihat §4.9) yang belum ada. Saat ini grammar ditulis tangan:
+lexer `AsciiLexer` + parser `Parser` di `brak-frontend`.
 
-### 5.4 First-Class Incremental Compilation
+### 5.4 Incremental Compilation — Sebagian
 
-Setiap node IR punya `ContentHash` yang dihitung dari:
-- Content node itu sendiri
-- Content hash dari child nodes
-- Version compiler
-
-Saat kompilasi ulang:
-1. Parser hash source file → compare dengan cache
-2. Hanya function yang berubah di-parse
-3. Lowering hanya jalan untuk function dengan AST baru
-4. Optimization hanya jalan untuk function dengan LIR baru
-5. Codegen hanya jalan untuk function dengan hasil opt baru
-
-**Teknis**: Cache disimpan di `brak-cache/` directory, format MessagePack + Zstd.
+- `ContentHash` 📦: trait hashing tersedia (`brak-core`), dipakai PassManager untuk
+  deteksi perubahan.
+- Cache persisten 🚧 **eksperimental**: `brak-bitcode` menyimpan AST/HIR/MIR/LIR
+  (`get_or_compute_*`), format **serde_json** (bukan MessagePack), dan **belum
+  terintegrasi** ke CLI maupun `brak-easy`.
+- Parser/backed caching per-function ("hanya fungsi yang berubah") 🚧 belum ada.
 
 ### 5.5 Polyglot FFI Zero-Cost
 
@@ -387,90 +379,71 @@ Brak menghilangkan dichotomi "ekosistem bahasa". Semua bahasa Brak itu satu kelu
 └─────────────────────────────────────────────────────┘
 ```
 
-**Use case real**: Kamu punya kode ML di Python-like language, kode networking di Rust-like language, UI logic di JS-like language. Semua compile ke Brak IR, link jadi satu binary. Zero overhead.
+**Use case real saat ini**: `.brk` dan `.lit` di-compile ke IR yang sama lalu
+di-link jadi satu binary — fungsi Lit bisa dipanggil dari Brak tanpa glue code
+(contoh `samples/cross_lit.brk`). Keluar ke bahasa lain (C/Python) via C ABI + header.
 
 ### 5.6 Testing Framework Built-in
 
 `brak-test` bukan add-on — ini komponen first-class yang didesain bareng IR.
 
-Fitur unik:
-- **IR Snapshot Testing**: simpan expected IR output (format YAML/JSON) di repo
-- **Auto-update**: `--update` flag → update semua snapshot
-- **Differential Testing**: compile ke asm vs obj vs llvm, bandingkan hasil
-- **Fuzzing Integration**: property-based testing untuk compiler pass
-- **Regression Hooks**: tiap commit auto-run test suite compiler
+Fitur yang terimplementasi:
+- **IR Snapshot Testing**: simpan expected IR output ke snapshot dir, `update: true` untuk auto-refresh
+- **Diagnostic Testing**: `assert_has_error` / `assert_has_warning`
+- **Execution & Differential Testing (initial)**: jalankan exe, bandingkan output/exit
+
+🚧 **Fuzzing Integration** (property-based) dan **Regression Hooks** — belum ada.
 
 ### 5.7 DebugInfo First-Class
 
-Beda dengan LLVM yang debug info-nya bolted-on via metadata kompleks, Brak punya `DebugLoc` di setiap instruction LIR:
+Beda dengan LLVM yang debug info-nya bolted-on via metadata kompleks, Brak punya `debug: Span` di setiap instruction LIR:
 
 ```rust
 struct LirInst {
     opcode: Opcode,
-    operands: Vec<Operand>,
-    debug: DebugLoc,    // always present
+    operands: Vec<LirOperand>,
+    debug: Span,          // selalu ada (source location)
 }
 ```
 
-Semua backend:
-- `codegen-obj` → DWARF sections di ELF/Mach-O, CodeView di PE
-- `codegen-wasm` → DWARF wasm
-- `codegen-c` → `#line` directives
-- `codegen-asm` → comment with source location
+Status nyata backend:
+- `codegen-obj` → DWARF sections di ELF/Mach-O & CodeView di PE 🚧 **sebagian, belum terverifikasi penuh** (prioritas.md Fase 6 backlog)
+- `codegen-c` → `#line` directives 📦
+- `codegen-wasm` → DWARF wasm 🚧 tidak ada
+- `codegen-asm` → comment with source location 🚧 tidak ada
 
-### 5.8 Multi-Tier Compilation
+### 5.8 Multi-Tier Compilation 🚧 BELUM ADA
 
-Brak mendukung 3 mode kompilasi yang bisa dipilih per-function:
-
-| Mode | Kecepatan Compile | Kecepatan Eksekusi | Use Case |
-|------|------------------|-------------------|----------|
-| AstInterp | Instan | Lambat | Development, REPL |
-| MirJit | Cepat | Medium | Iterasi cepat |
-| LirOpt | Lambat | Maksimal | Production release |
-
-User bisa annotate function:
-```rust
-#[brak(compile = "jit")]  // develop cepat
-fn hot_path() { ... }
-
-#[brak(compile = "opt")]  // production
-fn critical() { ... }
-```
+Rencana 3 mode kompilasi per-function (AstInterp / MirJit / LirOpt) dan anotasi
+`#[brak(compile = "jit")]` — **belum diimplementasi**. Saat ini satu jalur penuh:
+frontend → HIR → MIR → LIR → opt → codegen → link.
 
 ### 5.9 Bring Your Own Pass (BYOP)
 
-Bukan cuma optimization pass — *semua* komponen bisa diganti:
+Bukan cuma optimization pass — *beberapa* komponen bisa diganti lewat trait:
 
-| Komponen Default | Bisa Diganti Dengan |
-|-----------------|-------------------|
-| BrakLexer | Tree-sitter, custom lexer |
-| BrakParser | LALRPOP, Pest, hand-written |
-| HirLower | Custom type system |
-| Opt passes | ML-based optimizer |
-| CodegenObj | Custom binary format |
-| LinkNative | Custom linker script |
-| Calling convention | Fastcall, thiscall, custom ABI |
+| Komponen | Mekanisme saat ini |
+|----------|--------------------|
+| Lexer | trait `BrakLexer` (sekarang `AsciiLexer`); buat struct sendiri lalu implement |
+| Parser | `Parser` dari `brak-frontend` (struct konkret) — bisa ditulis tangan, input token bebas |
+| Opt passes | trait `LirOptimizationPass` + `PassManager::add_pass` / `load_external_pass` 📦 |
+| Codegen | trait `CodegenBackend` + `CodegenExecutable` 📦 |
+| Linker | trait `LinkerBackend` 📦 |
+| HirLower / MirLower / LirLower | struct konkret (tanpa trait) — bisa memanggil API langsung |
 
-### 5.10 Compiler Compiler
+### 5.10 Compiler Compiler 🚧 RENCANA
 
-Brak bisa compile dirinya sendiri (self-hosting). Tapi lebih dari itu: Brak bisa compile compiler bahasa lain:
-
-```
-my_lang_compiler.brk  ──►  brak  ──►  my_lang_compiler.exe
-                                               │
-                                               ▼
-                                        my_lang_source.my  ──►  output.exe
-```
-
-Ini memungkinkan bootstrapping: bahasa baru bisa nulis compilernya sendiri di bahasa itu, lalu Brak compile compiler tersebut.
+Rencana: Brak bisa compile compiler bahasa lain (bootstrapping). Infrastruktur
+dasar mendukung (run-time, struct/enum), tapi **self-hosting penuh belum
+diverifikasi** — tidak ada bukti Brak berhasil meng-compile dirinya sendiri saat ini.
 
 ---
 
 ## 6. Dependency Graph
 
 ```
-brak-core (zero deps)
-  ├── brak-frontend (dep: brak-core)
+brak-core (zero deps — tipe dasar, Span, Diagnostic, ContentHash)
+  ├── brak-frontend (dep: brak-core, brak-ir-ast)
   ├── brak-ir-ast (dep: brak-core)
   ├── brak-ir-hir (dep: brak-core, brak-ir-ast)
   ├── brak-ir-mir (dep: brak-core, brak-ir-hir)
@@ -481,9 +454,11 @@ brak-core (zero deps)
   │     └── brak-codegen-* (dep: brak-codegen-traits)
   ├── brak-link-traits (dep: brak-core)
   │     └── brak-link-* (dep: brak-link-traits)
-  ├── brak-polyglot (dep: brak-core, brak-ir-*, brak-link-*)
+  ├── brak-polyglot (dep: brak-core, brak-ir-hir)
+  ├── brak-lang-lit (dep: brak-ir-hir)
   ├── brak-test (dep: brak-core, brak-ir-*)
-  ├── brak-ffi-* (dep: brak-core + selected components)
+  ├── brak-bitcode (dep: brak-ir-*)          — eksperimental
+  ├── brak-easy (dep: frontend, semua IR, opt, codegen-obj, link-native)
   └── brak-tool (dep: everything)
 ```
 
@@ -493,80 +468,110 @@ Setiap crate hanya perlu depend ke *satu level di bawahnya* + `brak-core`.
 
 ## 7. API Design
 
-### 7.1 Rust — Idiomatic
+> Referensi lengkap: `daftar_api.md`. Contoh di bawah adalah API nyata yang ada sekarang.
+
+### 7.1 Rust — pipeline level tinggi (`brak-easy`) 📦
 
 ```rust
-use brak_core::*;
-use brak_frontend::lexer::Lexer;
-use brak_frontend::parser::Parser;
+use brak_easy::{EasyPipeline, OptLevel};
 
-let src = Source::from_file("hello.my")?;
-let tokens = Lexer::new(&src).lex()?;
-let ast = Parser::new(&tokens).parse()?;
-let hir = HirLower::new().lower(ast)?;
-let mir = MirLower::new().lower(hir)?;
-let lir = LirLower::new().lower(mir)?;
-let lir_opt = PassManager::default().run(lir)?;
-let obj = Codegen::<ObjBackend>::new().codegen(&lir_opt)?;
-let exe = Linker::<NativeLinker>::new().link(&[obj])?;
-exe.write("output.exe")?;
+let src = "fn main() -> i32 { 42 }";
+EasyPipeline::new()
+    .with_opt_level(OptLevel::Default)
+    .build_executable("app", src, "app.exe")?;
 ```
 
-### 7.2 C ABI — Stable
+Atau level demi level (frontend → HIR → MIR → LIR → opt → obj → link):
+```rust
+use brak_core::SourceMap;
+use brak_frontend::lexer::{AsciiLexer, BrakLexer};
+use brak_frontend::parser::Parser;
+use brak_ir_hir::lower::HirLower;
+use brak_ir_hir::typeck::TypeChecker;
+use brak_ir_mir::lower::MirLower;
+use brak_ir_lir::lower::LirLower;
+use brak_codegen_traits::CodegenBackend;
+use brak_codegen_obj::ObjBackend;
+use brak_link_traits::{LinkerBackend, ObjectFile};
+use brak_link_native::NativeLinker;
+
+let sm = SourceMap::new("main.brk", src);
+let tokens = AsciiLexer::new().lex(&sm);
+let ast = Parser::new().parse(&tokens)?;
+let hir = HirLower::new().lower(ast).map_err(|e| e.to_string())?;
+TypeChecker::new().check(&hir)?;
+let mir = MirLower::new().lower(hir)?;
+let mut ll = LirLower::new();
+ll.set_file_id(0);
+let lir = ll.lower(mir);
+let obj = ObjBackend::default().emit(&lir)?;
+let exe = NativeLinker.link(
+    &[ObjectFile { name: "main.o".into(), data: obj }],
+    "main", 0x140000000,
+)?;
+std::fs::write("output.exe", exe.data)?;
+```
+
+### 7.2 C — lewat header yang di-generate 📦
+
+Tidak ada C API *session* (pola `brak_session_*` belum ada). Jalur C = compile Brak
+ke shared library + generate header, lalu pakai dari C:
+
+```bash
+brak build lib.brk --shared --gen-h lib.h -o lib.dll
+```
 
 ```c
-#include <brak.h>
+#include "lib.h"   /* hasil generate: deklarasi fungsi publik Brak */
 
-int main() {
-    brak_session_t* s = brak_session_new();
-    brak_ast_t* ast = brak_parse_file(s, "hello.my");
-    brak_ir_t* ir = brak_lower(s, ast);
-    brak_opt_run(s, ir, BRAK_O2);
-    brak_codegen_obj(s, ir, "hello.o");
-    brak_link_native(s, (const char*[]){"hello.o"}, 1, "hello.exe");
-    brak_session_free(s);
-    return 0;
+int main(void) {
+    return add(10, 20);
 }
 ```
 
-### 7.3 Python — Pythonic
+### 7.3 Python — via PyO3 yang di-generate 📦
+
+Modul `brak` Python (pola `from brak import Session`) **belum ada**. Jalur nyata:
+
+```bash
+brak build lib.brk --py-module liblib -o py_liblib/
+cd py_liblib && maturin develop
+```
 
 ```python
-from brak import Session, LangBuilder
-
-s = Session()
-ast = LangBuilder(s).parse_file("hello.my")
-ir = ast.lower()
-ir.optimize("O2")
-ir.codegen("obj", "hello.o")
-s.link("native", ["hello.o"], "hello.exe")
+import liblib
+liblib.add(10, 20)   # memanggil fungsi Brak yang diekspor
 ```
 
 ---
 
 ## 8. Persistence & Caching
 
-- **Bitcode**: Simpan `IrLir` ke file biner (mirip LLVM bitcode) untuk caching
-- Crate `brak-bitcode` — serialize/deserialize semua level IR
-- Format: MessagePack + Zstd compression
-- **Content-addressed cache**: IR disimpan berdasarkan hash. Fungsi yang sama = hash sama = skip
+- **Bitcode**: Crate `brak-bitcode` — serialize/deserialize AST/HIR/MIR/LIR ke file JSON
+- Format nyata: **serde_json** (bukan MessagePack + Zstd)
+- **Content-addressed cache**: cache dikunci oleh hash yang anda berikan — lewat
+  `get_or_compute_*(hash, |f| ...)`; bila hash ada, compute tidak dijalankan
+- Status: 🚧 **eksperimental** — belum terintegrasi ke CLI maupun `brak-easy`
 
-### Cache Layout
+### API BitcodeCache
+
+```rust
+let cache = BitcodeCache::new(".brak_cache");
+let ast = cache.get_or_compute_ast(hash_of_src, || {
+    AstBuilder::default().build(src)   // hasil dipakai bila belum ter-cache
+});
+cache.invalidate("ast", hash);
+cache.clear_all();
+```
+
+### Struktur penyimpanan (di dalam direktori cache)
 
 ```
-.brak-cache/
-├── sources/
-│   ├── abc123.hash   (source file hash → list of function hashes)
-├── ir/
-│   ├── ast/
-│   │   └── func_def_abc.msgpack
-│   ├── hir/
-│   ├── mir/
-│   └── lir/
-├── opt/
-│   └── func_def_abc_opt_O2.msgpack
-└── obj/
-    └── func_def_abc.o
+<cache_dir>/
+├── ast/<hash>.json
+├── hir/<hash>.json
+├── mir/<hash>.json
+└── lir/<hash>.json
 ```
 
 ---
@@ -605,7 +610,7 @@ s.link("native", ["hello.o"], "hello.exe")
 - [x] `brak-link-native` — Mach-O linker
 - [x] `brak-tool` — pipeline `LIR → .o → linker → executable` via `brak build`
 - [x] `write_elf_executable` di `brak-codegen-obj` deprecated (pakai linker baru)
-- [x] `brak-link-archive` — static library (In Progress: Basic AR format)
+- [x] `brak-link-archive` — static library (AR format + symbol table + parser, input `.a`/`.lib` didukung CLI)
 - [x] **Milestone: Zero external tools pipeline**
 
 ### Phase 4 — Optimasi (`v0.5`) — 3-4 minggu
@@ -633,42 +638,45 @@ s.link("native", ["hello.o"], "hello.exe")
 - [x] **Milestone: Dua bahasa sample saling call tanpa FFI**
 
 ### Phase 7 — More Backends (`v0.8`) — 3-4 minggu
-- [x] `brak-codegen-wasm` — WASM bytecode output
+- [x] `brak-codegen-wasm` — output **WAT text** (bukan binary `.wasm`; butuh wat2wasm)
 - [x] `brak-codegen-c` — idiomatic C transpiler
-- [x] `brak-codegen-llvm` — LLVM IR bridge (opsional)
-- [x] `brak-link-wasm` — WASM module linker
-- [x] `brak-bitcode` — persistent IR cache
+- [x] `brak-codegen-llvm` — LLVM IR bridge (opsional, `.ll` struktural valid)
+- [x] `brak-link-wasm` — WASM module linker (remap type index nyata)
+- [x] `brak-bitcode` — persistent IR cache 🚧 **eksperimental** (JSON, belum terintegrasi)
 
-### Phase 8 — Debug Info (`v0.9`) — 2-3 minggu
-- [x] DWARF generation di codegen-obj (ELF & Mach-O .o) — `dwarf.rs` + `elf.rs`/`macho_obj.rs`
-  - [x] `.debug_line`, `.debug_info`, `.debug_abbrev`, `.debug_str` di relocatable .o
-  - [x] DWARF di ELF executable — `link_elf()` writes DWARF section headers + data
-  - [x] DWARF di Mach-O executable — `link_macho()` writes `__DWARF` segment
-  - [x] `parse_elf`/`parse_macho` extract DWARF into `debug_sections` — preserved through linking
+### Phase 8 — Debug Info (`v0.9`) — 🚧 SEBAGIAN (per prioritas.md)
+
+> **Peringatan**: prioritas.md menempatkan DWARF/PDB sebagai **backlog (Fase 6, "⏳ BACKLOG")**.
+> Kode sebagian sudah ada (`dwarf.rs`, `codeview.rs`, `pe.rs`), tapi **belum terverifikasi penuh**
+> dengan debugger dan tidak boleh dianggap selesai.
+
 - [x] `#line` directives di codegen-c — `CWriter::emit_inst()` emits `#line` on line change
-- [x] CodeView generation di codegen-obj (PE) — `codeview.rs` + `coff.rs`
-  - [x] `S_GPROC32` + `S_END` per function (function symbols)
-  - [x] `DEBUG_S_LINES` subsection (line-to-address mapping)
-  - [x] `.debug$S` section di COFF output
-- [x] PE debug directory — `pe.rs`
-  - [x] RSDS header (`CV_INFO_PDB70`) + merged C13 subsections
-  - [x] `IMAGE_DEBUG_DIRECTORY` entry (Type=2, CodeView)
-  - [x] `.rdata` section + data directory entry 6
-- [x] Debugger can set breakpoints on Brak-compiled code (PE)
-  - [x] Can set by function name (`S_GPROC32`)
-  - [x] Can set by source line (`DEBUG_S_LINES`)
-  - [ ] Verified with WinDbg/CDB — manual test, environment belum siap
-  - [ ] PDB file generation — opsional, deferred (RSDS + C13 cukup untuk MVP)
+- [~] DWARF generation di codegen-obj (ELF & Mach-O .o) — `dwarf.rs` + `elf.rs`/`macho_obj.rs`
+  - [~] `.debug_line`, `.debug_info`, `.debug_abbrev`, `.debug_str` di relocatable .o
+  - [~] DWARF di ELF executable — `link_elf()` writes DWARF section headers + data
+  - [~] DWARF di Mach-O executable — `link_macho()` writes `__DWARF` segment
+  - [~] `parse_elf`/`parse_macho` extract DWARF into `debug_sections` — preserved through linking
+- [~] CodeView generation di codegen-obj (PE) — `codeview.rs` + `coff.rs`
+  - [~] `S_GPROC32` + `S_END` per function (function symbols)
+  - [~] `DEBUG_S_LINES` subsection (line-to-address mapping)
+  - [~] `.debug$S` section di COFF output
+- [~] PE debug directory — `pe.rs` (RSDS header, `IMAGE_DEBUG_DIRECTORY`, `.rdata`)
+- [ ] Verified dengan debugger nyata (WinDbg/CDB) — manual test belum dilakukan
+- [ ] PDB file generation — deferred
+- **Aksi**: sebelum dianggap selesai, verifikasi dengan debugger + pindahkan status di prioritas.md
 
-### Phase 9 — Maturity (`v1.0`) — ✓ SELESAI
-- [x] Full optimization pipeline (8+ passes)
-- [x] SROA (Basic), Inlining, LICM, TCO, Jump Threading, Constant Folding
-- [x] Iterative optimization pass manager (Convergence support)
-- [x] Self-hosting (Brak bisa compile Brak) - Infrastruktur siap (Struct/Enum support)
-- [x] Stabil ABI untuk C bindings (via brak-polyglot)
-- [x] Comprehensive documentation + tutorial (README, LANG_BRAK, POLYGLOT_GUIDE)
-- [x] `brak-easy` — High-level user-friendly mapping tool & pipeline API
+### Phase 9 — Maturity (`v1.0`) — ✓ SELESAI* (dengan catatan)
+
+- [x] Pipeline optimasi: **CLI** 8 pass (Fold, CP, Inline, GVN, LICM, JT, TCO, DCE); **brak-easy** 5 pass default
+- [x] Inlining, LICM, TCO (self tail-call nyata), Jump Threading, Constant Folding
+- [x] Iterative optimization pass manager (convergence via ContentHash)
+- [~] Self-hosting (Brak compile Brak) — infrastruktur siap (struct/enum), **belum diverifikasi** (lihat §5.10)
+- [~] Stabil ABI untuk C bindings (via brak-polyglot) — binding tersedia, klaim stabilitas lintas versi belum divalidasi
+- [x] Documentation: README, LANG_BRAK, LANG_LIT, POLYGLOT_GUIDE, daftar_api.md
+- [x] `brak-easy` — pipeline level tinggi untuk konsumen library
 - [ ] Benchmark suite vs LLVM
+- [ ] SROA — **tidak ada** (crate `brak-opt-sroa` belum pernah dibuat; baris lama salah)
+- Realita tambahan: daftar bug lengkap & status fase → `prioritas.md`
 
 ## 10. Design Principles & Workflow
 
@@ -702,11 +710,11 @@ s.link("native", ["hello.o"], "hello.exe")
 |--------|--------|------------|
 | `Brak` | `BrakLexer` | Rust type/trait |
 | `Ir` | `IrLir`, `IrMir` | Intermediate representation nodes |
-| `BRK_` | `BRK_ERROR_TYPE` | C ABI constant |
-| `brk_` | `brk_session_new` | C ABI function |
-| `brak.` | `brak.config.toml` | Config file |
+| `BRK_` | `BRK_ERROR_TYPE` | C ABI constant — 🚧 rencana (C session API belum ada) |
+| `brk_` | `brk_session_new` | C ABI function — 🚧 rencana (belum ada) |
+| `brak.` | `brak.config.toml` | Config file — 🚧 rencana (belum ada parser config) |
 | `.brk` | `main.brk` | Source file extension |
-| `.bkr` | `output.bkr` | Brak bitcode IR |
+| `.bkr` | `output.bkr` | Brak bitcode IR — 🚧 rencana (brak-bitcode sekarang pakai file **`.json`** via serde_json) |
 
 ---
 
@@ -714,41 +722,42 @@ s.link("native", ["hello.o"], "hello.exe")
 
 ```
 brak/
-├── Cargo.workspace.toml
+├── Cargo.toml             (workspace root)
 ├── prd.md
+├── prioritas.md
+├── daftar_api.md
 ├── brak-core/
-├── brak-frontend/
-├── brak-ir/
-│   ├── brak-ir-ast/
-│   ├── brak-ir-hir/
-│   ├── brak-ir-mir/
-│   └── brak-ir-lir/
-├── brak-opt/
-│   ├── brak-opt-traits/
-│   ├── brak-opt-dce/
-│   ├── brak-opt-cp/
-│   ├── brak-opt-gvn/
-│   ├── brak-opt-inline/
-│   ├── brak-opt-sroa/
-│   └── brak-opt-licm/
-├── brak-codegen/
-│   ├── brak-codegen-traits/
-│   ├── brak-codegen-asm/
-│   ├── brak-codegen-obj/
-│   ├── brak-codegen-c/
-│   ├── brak-codegen-wasm/
-│   └── brak-codegen-llvm/
-├── brak-link/
-│   ├── brak-link-traits/
-│   ├── brak-link-native/
-│   └── brak-link-wasm/
-├── brak-ffi/
-│   ├── brak-ffi-c/
-│   └── brak-ffi-python/
-├── brak-polyglot/
-├── brak-test/
-├── brak-bitcode/
-└── brak-tool/
+├── brak-frontend/         (lexer::{AsciiLexer, BrakLexer}, parser::{Parser, Program})
+├── brak-ir-ast/
+├── brak-ir-hir/           (lower::HirLower, typeck::TypeChecker)
+├── brak-ir-mir/           (lower::MirLower)
+├── brak-ir-lir/           (lower::LirLower)
+├── brak-opt-traits/       (PassManager, LirOptimizationPass)
+├── brak-opt-fold/
+├── brak-opt-cp/
+├── brak-opt-gvn/
+├── brak-opt-inline/
+├── brak-opt-licm/
+├── brak-opt-jt/
+├── brak-opt-tco/
+├── brak-opt-dce/
+├── brak-opt-utils/
+├── brak-codegen-traits/   (CodegenBackend, CodegenExecutable)
+├── brak-codegen-obj/      (ObjBackend — ELF/PE/Mach-O)
+├── brak-codegen-asm/      (dx86asm) — belum ada consumer
+├── brak-codegen-c/        (CWriter)
+├── brak-codegen-wasm/     (WAT text)
+├── brak-codegen-llvm/     (LLVM IR text)
+├── brak-link-traits/      (LinkerBackend, ObjectFile)
+├── brak-link-native/      (PE/ELF/Mach-O linker)
+├── brak-link-wasm/        (WASM module linker)
+├── brak-link-archive/     (AR static lib)
+├── brak-polyglot/         (normalisasi tipe lintas bahasa, FFI, gen C header & PyO3)
+├── brak-lang-lit/         (bahasa Lit — konstanta saja, -> cross_lit.brk)
+├── brak-test/             (IR/diff/exec snapshot testing)
+├── brak-bitcode/          (eksperimental, serde_json cache)
+├── brak-easy/             (EasyPipeline, OptLevel — pipeline 5 pass)
+└── brak-tool/             (CLI: brak build | emit-ir | help)
 ```
 
 Setiap crate punya `Cargo.toml` sendiri, semuanya di-root workspace.
@@ -757,60 +766,56 @@ Setiap crate punya `Cargo.toml` sendiri, semuanya di-root workspace.
 
 ## 14. Contoh Use Case Lengkap
 
-Skenario: Kamu mau buat bahasa scripting sederhana "LiteLang" dengan Brak.
+> Skenario asli (grammar-driven: `grammar.lite.ebnf` → Brak generates parser/ast) 🚧 **BELUM ADA**
+> — tidak ada generator parser berbasis grammar. Jalur nyata: tulis lexer/parser sendiri
+> di atas token dasar + pipeline trasnformer.
+
+Skenario nyata: kamu mau buat bahasa scripting sederhana "LiteLang" dengan Brak.
 
 ```rust
-// 1. Define grammar (brak-syntax)
-// grammar.lite.ebnf
-program      = { statement } ;
-statement    = let_stmt | expr_stmt ;
-let_stmt     = "let", ident, "=", expr, ";" ;
-expr_stmt    = expr, ";" ;
-expr         = term, { ("+" | "-"), term } ;
-term         = factor, { ("*" | "/"), factor } ;
-factor       = number | ident | "(", expr, ")" ;
+// 1. Lex & parse pakai parser umum (tokennya sama: Vec<brak_ir_ast::Token>)
+use brak_core::SourceMap;
+use brak_frontend::lexer::{AsciiLexer, BrakLexer};
+use brak_frontend::parser::Parser;
+use brak_ir_hir::hir::*;
+use brak_ir_hir::lower::HirLower;
 
-// 2. Brak generates: parser.rs, ast_types.rs, formatter.rs
+let sm = SourceMap::new("main.lite", src);
+let tokens = AsciiLexer::new().lex(&sm);
+let ast = Parser::new().parse(&tokens)?;
 
-// 3. Write lowering pass (50 lines)
-use brak_core::*;
-use brak_ir_ast::*;
-use brak_ir_hir::*;
+// 2. Lowering kustom: AST umum → HIR (peta fitur bahasa kamu)
+let mut hir = HirLower::new().lower(ast).map_err(|e| e.to_string())?;
+//   lalu transformasikan Hir sesuai semantik LiteLang...
 
-struct LiteLower;
-impl HirLower for LiteLower {
-    fn lower_expr(&self, expr: AstExpr) -> Result<HirExpr> {
-        match expr {
-            AstExpr::Number(n) => Ok(HirExpr::Const(HirConst::Int(n))),
-            AstExpr::Add(l, r) => Ok(HirExpr::BinOp(
-                BinOp::Add,
-                Box::new(self.lower_expr(*l)?),
-                Box::new(self.lower_expr(*r)?),
-            )),
-            // ...
-        }
-    }
-}
+// 3. Pipeline kebawah ke executable (API nyata)
+use brak_ir_mir::lower::MirLower;
+use brak_ir_lir::lower::LirLower;
+use brak_opt_traits::PassManager;
+use brak_opt_fold::ConstantFolding;
+use brak_opt_cp::ConstantPropagation;
+use brak_codegen_traits::CodegenBackend;
+use brak_codegen_obj::ObjBackend;
+use brak_link_traits::{LinkerBackend, ObjectFile};
+use brak_link_native::NativeLinker;
 
-// 4. Compile pipeline (30 lines)
-fn compile(src: &str) -> Result<Vec<u8>> {
-    let tokens = BrakLexer::new(src).lex()?;
-    let ast = Parser::new(&tokens, &grammar::rules()).parse()?;
-    let hir = LiteLower.lower(ast)?;
-    let mir = MirLower::new().lower(hir)?;
-    let lir = LirLower::new().lower(mir)?;
-    let lir = PassManager::default()
-        .with_pass(Dce)
-        .with_pass(ConstantProp)
-        .run(lir)?;
-    let obj = Codegen::<ObjBackend>::new().codegen(&lir)?;
-    Linker::<NativeLinker>::new()
-        .link(&[obj])?
-        .write("output.exe")
-}
+let mir = MirLower::new().lower(hir);
+let mut ll = LirLower::new();
+ll.set_file_id(0);
+let lir = ll.lower(mir);
 
-// 5. Done. output.exe is a real, standalone executable.
-// No C compiler, no assembler, no linker needed.
+let mut pm = PassManager::new();
+pm.add_pass(Box::new(ConstantFolding));
+pm.add_pass(Box::new(ConstantPropagation));
+let lir = pm.run(lir)?;
+
+let obj = ObjBackend::default().emit(&lir)?;
+let exe = NativeLinker.link(
+    &[ObjectFile { name: "main.o".into(), data: obj }],
+    "main", 0x140000000,
+)?;
+std::fs::write("output.exe", exe.data)?;
 ```
 
-Total: ~80 lines Rust untuk bahasa lengkap dengan compiler. Ini yang membuat Brak unik.
+Total: ~50 baris Rust untuk bahasa sederhana dengan compiler. Jalur librari
+level tinggi yang lebih ringkas: `brak-easy` (lihat §7.1).
