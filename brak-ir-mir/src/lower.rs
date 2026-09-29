@@ -211,6 +211,35 @@ impl MirLower {
                         Some(b) => self.lower_block_to_cfg(b)?,
                         None => vec![],
                     };
+
+                    let then_falls_through = then_blocks.last()
+                        .map_or(false, |b| b.name != "unreachable");
+                    let then_value = then_blocks.last().and_then(|b| match &b.terminator {
+                        MirTerminator::Return { value, .. } => *value,
+                        _ => None,
+                    });
+                    let else_falls_through = match else_ {
+                        Some(_) => else_blocks.last().map_or(false, |b| b.name != "unreachable"),
+                        None => true,
+                    };
+                    let else_value = else_blocks.last().and_then(|b| match &b.terminator {
+                        MirTerminator::Return { value, .. } => *value,
+                        _ => None,
+                    });
+                    let has_fallthrough = then_falls_through || else_falls_through;
+                    let all_fallthroughs_have_values =
+                        (!then_falls_through || then_value.is_some())
+                            && (!else_falls_through || else_value.is_some());
+                    let result_local = if has_fallthrough && all_fallthroughs_have_values {
+                        let id = self.fresh_local();
+                        self.locals.push(MirLocal {
+                            name: format!("tmp_{id}"),
+                            ty: MirType::I32,
+                        });
+                        Some(id)
+                    } else {
+                        None
+                    };
                     
                     let then_start = blocks.len() + 1;
                     let else_start = then_start + then_blocks.len();
@@ -238,6 +267,19 @@ impl MirLower {
                         if b.name == "unreachable" {
                             // real return statement — keep terminator
                         } else {
+                            let branch_value = match &b.terminator {
+                                MirTerminator::Return { value: Some(value), span } => {
+                                    Some((*value, *span))
+                                }
+                                _ => None,
+                            };
+                            if let (Some(dest), Some((value, value_span))) = (result_local, branch_value) {
+                                b.insts.push(MirInst::Assign {
+                                    dest,
+                                    value: MirValue::Local(value),
+                                    span: value_span,
+                                });
+                            }
                             b.terminator = MirTerminator::Jump { target: after, span: *span };
                         }
                         b.id = blocks.len();
@@ -249,6 +291,19 @@ impl MirLower {
                         if b.name == "unreachable" {
                             // real return statement — keep terminator
                         } else {
+                            let branch_value = match &b.terminator {
+                                MirTerminator::Return { value: Some(value), span } => {
+                                    Some((*value, *span))
+                                }
+                                _ => None,
+                            };
+                            if let (Some(dest), Some((value, value_span))) = (result_local, branch_value) {
+                                b.insts.push(MirInst::Assign {
+                                    dest,
+                                    value: MirValue::Local(value),
+                                    span: value_span,
+                                });
+                            }
                             b.terminator = MirTerminator::Jump { target: after, span: *span };
                         }
                         b.id = blocks.len();
@@ -258,6 +313,7 @@ impl MirLower {
                     // Start the 'after' block
                     current_insts = vec![];
                     current_name = "if_merge".to_string();
+                    last_expr_result = result_local;
                 }
                 HirStmt::While { cond, body, span } => {
                     let cond_header = blocks.len();
@@ -1360,6 +1416,54 @@ mod tests {
         let mut lowerer = MirLower::new();
         let mir_func = lowerer.lower_function(hir_func).unwrap();
         assert!(mir_func.blocks.len() >= 3, "if should produce at least 3 blocks");
+        let return_local = match &mir_func.blocks.last().unwrap().terminator {
+            MirTerminator::Return { value: Some(local), .. } => *local,
+            other => panic!("if-expression result should be returned, got {other:?}"),
+        };
+        let branch_result_writes = mir_func.blocks.iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| matches!(inst,
+                MirInst::Assign { dest, value: MirValue::Local(_), .. } if *dest == return_local
+            ))
+            .count();
+        assert_eq!(branch_result_writes, 2, "both if branches must write the merge result");
+    }
+
+    #[test]
+    fn test_lower_tail_if_statement_preserves_branch_value() {
+        let hir_func = dummy_hir_fn("test", vec![
+            HirStmt::If {
+                cond: Box::new(HirExpr::Bool(true, dummy_span())),
+                then: HirBlock {
+                    stmts: vec![HirStmt::Expr(
+                        Box::new(HirExpr::Int(1, dummy_span())),
+                        dummy_span(),
+                    )],
+                    span: dummy_span(),
+                },
+                else_: Some(HirBlock {
+                    stmts: vec![HirStmt::Expr(
+                        Box::new(HirExpr::Int(0, dummy_span())),
+                        dummy_span(),
+                    )],
+                    span: dummy_span(),
+                }),
+                span: dummy_span(),
+            },
+        ]);
+        let mut lowerer = MirLower::new();
+        let mir_func = lowerer.lower_function(hir_func).unwrap();
+        let return_local = match &mir_func.blocks.last().unwrap().terminator {
+            MirTerminator::Return { value: Some(local), .. } => *local,
+            other => panic!("tail if statement should return its branch value, got {other:?}"),
+        };
+        let branch_result_writes = mir_func.blocks.iter()
+            .flat_map(|block| &block.insts)
+            .filter(|inst| matches!(inst,
+                MirInst::Assign { dest, value: MirValue::Local(_), .. } if *dest == return_local
+            ))
+            .count();
+        assert_eq!(branch_result_writes, 2, "both if branches must write the merge result");
     }
 
     #[test]
