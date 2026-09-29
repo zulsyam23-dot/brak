@@ -1,35 +1,33 @@
 # Panduan Bahasa Lit (.lit)
 
-**LitLang** adalah bahasa pemrograman alternatif yang jauh lebih sederhana dalam ekosistem Brak. Ia dirancang untuk mendemonstrasikan betapa mudahnya menambahkan dukungan bahasa baru ke dalam pipeline compiler Brak.
+Lit adalah bahasa kecil yang didukung oleh parser dan pipeline Brak. Implementasinya masih terbatas pada fungsi yang mengembalikan literal integer atau string.
 
 ## Sintaks Sederhana
 Lit saat ini hanya mendukung fungsi konstanta — satu ekspresi literal per fungsi:
 
 ```lit
-fn versi() -> i32 = 42;
-fn salam() -> string = "Halo dari Lit";
+fn versi() -> I32 = 42;
+fn salam() -> String = "Halo dari Lit";
 ```
 
-Sintaks dengan body `{ ... }`, `let`, dan pemanggilan fungsi (contoh di bawah)
-belum didukung grammar Lit saat ini:
+Body blok, variabel, operator, dan pemanggilan fungsi belum didukung parser Lit:
 
 ```lit
 // BELUM DIDUKUNG — dokumentasi tujuan jangka panjang:
 // fn tambah(a: i32, b: i32) -> i32 { a + b }
 ```
 
-## Perbedaan Utama dengan Brak
-- **Parsing Cepat**: Parser Lit jauh lebih ringan dan cepat karena fiturnya yang terbatas.
-- **Tujuan Khusus**: Lit sering digunakan untuk menulis skrip kecil atau modul pembantu yang akan dipanggil oleh kode Brak melalui Polyglot.
+Tipe bawaan dalam anotasi Lit ditulis dengan nama kapital seperti `I32`, `I64`, `F32`, `F64`, `Bool`, `String`, dan `Void`. Ekspresi fungsi tetap dibatasi pada literal integer atau string.
 
 ## Cara Kompilasi
-Anda bisa mengompilasi file `.lit` menggunakan tool yang sama:
+CLI `brak-tool` menerima file `.lit` sebagai input build dan menghubungkannya ke executable native:
 
 ```bash
 cargo run -p brak-tool -- build program_saya.lit --output program.exe
 ```
 
-Atau melihat HIR (High-level IR) yang dihasilkan untuk memastikan kode Anda valid:
+Binary khusus `brak-lit` menghasilkan object file `.o` dari satu file Lit:
+
 ```bash
-cargo run -p brak-tool -- emit-ir program_saya.lit --level hir
+cargo run -p brak-lang-lit -- samples/hello_lit.lit
 ```

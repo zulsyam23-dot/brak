@@ -1,8 +1,5 @@
 # brak-ir-lir
 
-**Low-level Intermediate Representation (LIR)**.
+Low-level Intermediate Representation Brak berbasis virtual register dan basic block.
 
-## Kegunaan
-- **Register Based**: Berbeda dengan tahap sebelumnya, LIR bekerja dengan konsep register (seperti cara kerja CPU asli).
-- **Optimization Ready**: Format yang paling ideal untuk dilakukan optimasi performa.
-- Menjadi input terakhir sebelum diubah menjadi kode mesin asli (Binary).
+`LirLower` mengubah MIR menjadi LIR. LIR menjadi input pass optimasi dan backend codegen; object file atau executable dihasilkan oleh crate backend dan linker terpisah.

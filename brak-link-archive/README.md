@@ -1,6 +1,11 @@
 # brak-link-archive
 
-Pembuat library statis.
+Penulis dan parser archive object untuk format library statis `.a` dan `.lib`.
 
-## Kegunaan
-Mengemas beberapa file objek menjadi file library statis (`.lib` atau `.a`) agar bisa digunakan kembali oleh proyek lain di kemudian hari.
+## API
+
+- `ArchiveWriter::new(format)`, `add_entry(name, data)`, dan `write()` untuk membuat archive.
+- `ArchiveFormat::Unix` dan `ArchiveFormat::Windows` memilih format keluaran.
+- `parse_archive(data)` membaca member object dan mengabaikan member indeks/nama khusus.
+
+Writer membangun indeks simbol dari simbol global terdefinisi yang dapat dibaca dari object ELF, COFF, atau Mach-O. `brak-tool build` menerima archive sebagai input dan menautkan member object-nya.

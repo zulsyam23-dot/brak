@@ -2,6 +2,7 @@
 name = "brak-ir-mir"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Brak Mid-level IR: CFG, basic blocks, flat instructions"
 
 [dependencies]

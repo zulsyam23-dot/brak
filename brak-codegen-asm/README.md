@@ -1,8 +1,9 @@
 # brak-codegen-asm
 
-Generator kode mesin asli (Native Machine Code).
+Backend eksperimental yang menerjemahkan LIR menjadi teks assembly x86_64 bergaya Intel/NASM. `AsmBackend::emit` mengembalikan byte UTF-8 dari teks assembly, bukan machine code atau executable.
 
-## Kegunaan
-- Fokus pada arsitektur **x86_64**.
-- Melakukan **Register Allocation**: Mengatur variabel mana yang masuk ke register CPU asli (rax, rbx, dll).
-- Menghasilkan instruksi binary yang bisa langsung dijalankan oleh CPU.
+Backend memakai `SimpleAlloc` untuk memetakan virtual register selama emission. Crate ini terpisah dari backend object file yang dipakai pipeline build utama.
+
+## API
+
+Gunakan `brak_codegen_asm::emit_asm(&program)` untuk memperoleh teks assembly, atau `AsmBackend` melalui trait `CodegenBackend` untuk memperoleh byte output.

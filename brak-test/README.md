@@ -1,8 +1,11 @@
 # brak-test
 
-Utilitas pengujian khusus untuk compiler Brak.
+Helper pengujian compiler untuk snapshot IR, diagnostic, dan stdout executable.
 
-## Kegunaan
-- **Snapshot Testing**: Membandingkan hasil output IR saat ini dengan "foto" (snapshot) hasil yang benar di masa lalu.
-- **Diagnostic Testing**: Memastikan compiler mengeluarkan pesan error yang tepat saat diberikan kode yang salah.
-- **Execution Testing**: Menjalankan program hasil kompilasi dan memverifikasi output teksnya.
+## API
+
+- `SnapshotTester::new(directory, update)` menyimpan IR sebagai YAML; `assert_snapshot` membuat snapshot yang belum ada atau membandingkannya dengan yang tersimpan.
+- `DiagnosticTester::assert_has_error` dan `assert_has_warning` mencari pesan diagnostic berdasarkan severity dan substring.
+- `ExecutionTester::assert_output(path, expected)` menjalankan executable dan membandingkan stdout yang sudah di-trim. Helper ini tidak membandingkan exit code.
+
+Semua helper mengembalikan `brak_core::Result`, sehingga kegagalan dapat diteruskan sebagai error pengujian.

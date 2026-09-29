@@ -4,10 +4,9 @@ Brak adalah toolkit modular untuk membangun bahasa pemrograman dari nol hingga m
 
 ## Panduan Penggunaan Bahasa
 
-Untuk mempelajari cara menulis kode dan mengintegrasikan Brak dengan bahasa lain, silakan baca dokumen berikut:
+Untuk mempelajari cara menulis kode, silakan baca dokumen berikut:
 - [Panduan Bahasa Brak (.brk)](docs/LANG_BRAK.md) - Bahasa utama sistem.
 - [Panduan Bahasa Lit (.lit)](docs/LANG_LIT.md) - Bahasa alternatif sederhana.
-- [Panduan Polyglot (C & Python)](docs/POLYGLOT_GUIDE.md) - Cara memanggil fungsi Brak dari bahasa lain.
 
 ## Arsitektur Proyek
 
@@ -33,12 +32,12 @@ Berbagai modul untuk membuat kode lebih cepat dan kecil:
 - **LICM**: Mengeluarkan kode invariant dari loop.
 
 ### 4. Codegen & Linker
-- **brak-codegen-***: Mengubah LIR menjadi kode mesin (x86_64), C, LLVM, atau WASM.
+- **brak-codegen-obj**: Mengubah LIR menjadi object file native.
+- **brak-codegen-asm**: Menghasilkan teks assembly.
 - **brak-link-***: Menggabungkan file objek menjadi executable atau library (.exe, .dll, .a).
 
 ### 5. Fitur Unik
-- **brak-polyglot**: Bridge untuk memanggil fungsi antar bahasa yang berbeda tanpa biaya (Zero-cost FFI).
-- **brak-bitcode**: Sistem caching cerdas agar kompilasi ulang hanya memproses bagian yang berubah.
+- **brak-bitcode**: Cache eksperimental untuk AST/HIR/MIR/LIR dalam JSON; belum terintegrasi ke pipeline kompilasi.
 
 ## Cara Menggunakan
 
@@ -69,18 +68,18 @@ Untuk memastikan kode Anda berjalan lancar tanpa kesalahan:
   ```bash
   brak emit-ir samples/hello.brk --level hir  # Cek tipe data
   brak emit-ir samples/hello.brk --level mir  # Cek alur kontrol (CFG)
-  brak emit-ir samples/hello.brk --level c    # Lihat hasil transpilaasi C
+  brak emit-ir samples/hello.brk --level obj  # Hasilkan object file native
   ```
 - **Verifikasi dengan Testing**: Selalu jalankan test suite jika Anda mengubah kompilator:
   ```bash
   cargo test
   ```
 
-## Fitur Unggulan v1.0
-- **Self-Hosting Ready**: Dukungan `struct` dan `enum` lengkap untuk membangun kompilator di dalam Brak.
+## Status Proyek
+- **Self-hosting**: Belum diverifikasi.
 - **Zero-Dependency**: Tidak butuh LLVM/GCC terinstal di sistem target.
-- **Smart Caching**: Sistem caching IR tersedia via `brak-bitcode` (eksperimental — belum terintegrasi penuh ke CLI).
-- **High Performance**: Pipeline optimasi 8 pass aktif (Fold, CP, Inline, GVN, LICM, JT, TCO, DCE) dengan differential testing.
+- **Cache IR**: API eksperimen tersedia melalui `brak-bitcode`; bukan bagian dari build CLI.
+- **Optimasi**: CLI dan `brak-easy` memakai pipeline pass yang berbeda; lihat dokumentasi crate untuk batas tiap pass.
 
 ---
 *Dibuat secara profesional untuk memastikan modularitas, kejujuran performa, dan kemudahan pengembangan bahasa.*

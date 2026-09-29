@@ -1,8 +1,5 @@
 # brak-ir-mir
 
-**Mid-level Intermediate Representation (MIR)**.
+Mid-level Intermediate Representation yang menurunkan HIR menjadi instruksi dan basic block dengan control flow eksplisit.
 
-## Kegunaan
-- **Control Flow Graph (CFG)**: Mengubah kode linear menjadi graf alur program (cabang `if`, perulangan `while`).
-- **Local Variable Management**: Mengelola variabel lokal dan cakupannya (*scope*).
-- Menjadi jembatan antara HIR yang masih mirip bahasa manusia ke LIR yang mendekati bahasa mesin.
+Gunakan `MirLower::new().lower(hir)` untuk membuat MIR. Hasilnya menjadi input `LirLower` di `brak-ir-lir`; crate ini tidak menjalankan optimasi atau menghasilkan object file.

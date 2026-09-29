@@ -1,8 +1,7 @@
 # brak-ir-ast
 
-Mendefinisikan **Abstract Syntax Tree (AST)**, yaitu representasi paling awal dari struktur kode setelah di-parse.
+Definisi Abstract Syntax Tree yang dihasilkan parser Brak.
 
-## Kegunaan
-- Menjadi "bahasa komunikasi" antara Frontend dan tahap Lowering berikutnya.
-- Menyimpan struktur asli program (fungsi, variabel, ekspresi) beserta lokasi kode aslinya (span).
-- Mendukung serialisasi (JSON/YAML) untuk keperluan debugging.
+AST menyimpan item dan ekspresi program beserta span sumber. `Program` menjadi input lowering HIR; tipe AST juga mendukung serialisasi untuk inspeksi dan pengujian.
+
+Crate ini mendefinisikan struktur data, bukan lexer, parser, type checker, atau backend codegen.

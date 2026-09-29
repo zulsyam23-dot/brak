@@ -1,6 +1,7 @@
 # brak-opt-cp (Constant Propagation)
 
-Optimasi yang mencari variabel dengan nilai tetap (konstan).
+Pass propagasi konstanta integer untuk LIR. Pass melacak nilai register lintas basic block menggunakan analisis dataflow dan hanya mengganti nilai pada titik ketika semua jalur masuk menyepakati konstanta yang sama.
 
-## Kegunaan
-Jika ada kode `let x = 5; let y = x + 10;`, optimasi ini akan langsung mengubahnya menjadi `y = 15` saat kompilasi, sehingga CPU tidak perlu menghitungnya lagi saat program dijalankan.
+Operasi `Add`, `Sub`, dan `Mul` dengan operand konstan juga dilipat menjadi `Mov`. Untuk menghindari perubahan semantik backend, substitusi dibatasi pada opcode yang menerima immediate.
+
+Tambahkan `ConstantPropagation` ke `PassManager`; nama pass-nya adalah `cp`.

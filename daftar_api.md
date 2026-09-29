@@ -1,7 +1,7 @@
 # Daftar API Brak — Catatan Penting
 
 > **Sumber data**: dokumen ini diambil langsung dari kode sumber yang ada saat ini
-> (30 crate di workspace) dan diverifikasi dengan menjalankan binary `target/release/brak.exe`
+> dan diverifikasi dengan menjalankan binary `target/release/brak.exe`
 > (output `--help`, build + run `samples/hello.brk` → exit code 42).
 > Tidak ada klaim dokumentasi yang tidak didukung kode.
 
@@ -56,12 +56,9 @@ Mencetak IR level tertentu dari sebuah file sumber.
 
 | Flag | Nilai | Default |
 |------|-------|---------|
-| `-l, --level <LEVEL>` | `tokens`, `ast`, `hir`, `mir`, `lir`, `asm`, `obj`, `c`, `wasm`, `llvm` * | `ast` |
+| `-l, --level <LEVEL>` | `tokens`, `ast`, `hir`, `mir`, `lir`, `asm`, `obj` | `ast` |
 | `-f, --format <FORMAT>` | `text`, `json`, `yaml` (diabaikan untuk asm/obj) | `text` |
 | `-o, --output <OUTPUT>` | file tujuan (default: stdout untuk text, `<file>.o` untuk obj) | — |
-
-*Catatan: `--help` menampilkan `tokens, ast, hir, mir, lir, asm, obj`, tapi kode
-(`brak-tool/src/main.rs:126-238`) juga menerima `c`, `wasm`, `llvm`.
 
 Contoh terverifikasi:
 ```bash
@@ -72,9 +69,6 @@ brak emit-ir samples/hello.brk --level hir
 
 brak emit-ir samples/hello.brk --level ast --format json
 brak emit-ir samples/hello.brk --level lir
-brak emit-ir samples/hello.brk --level c    --output hello.c
-brak emit-ir samples/hello.brk --level llvm --output hello.ll
-brak emit-ir samples/hello.brk --level wasm --output hello.wat
 ```
 
 ### 2.2 `brak build <FILES>...`
@@ -90,9 +84,7 @@ atau shared library.
 | `--opt-pass <PATH>` | path plugin pass optimasi dinamis (`.so`, `.dll`, `.dylib`) | — |
 | `--opt-iterations <N>` | berapa kali pipeline optimasi dijalankan | `1` |
 | `--verbose-opt` | cetak log optimasi detail | off |
-| `--gen-h <PATH>` | hasilkan C header untuk fungsi publik | — |
 | `--shared` | build DLL/shared library (bukan executable) | off |
-| `--py-module <NAME>` | hasilkan proyek PyO3 extension module dengan nama ini | — |
 
 Catatan perilaku nyata (`brak-tool/src/main.rs`):
 - Input `.brk`: pipeline penuh + **8 pass** Fold, CP, Inline, GVN, LICM, JT, TCO, DCE
@@ -112,11 +104,6 @@ brak build main.brk lib.math.a -e main -o app.exe
 # DLL
 brak build math.brk --shared -o math.dll
 
-# C header
-brak build math.brk --gen-h math.h --shared
-
-# Python extension (menghasilkan folder proyek PyO3)
-brak build math.brk --py-module mathlib -o py_mathlib/
 ```
 
 > Keterbatasan nyata: dengan `--shared` di Linux, linker hanya menghasilkan error
@@ -368,9 +355,6 @@ pub trait CodegenExecutable: CodegenBackend {
 | Crate | Struct | Fungsi bebas | Output |
 |-------|--------|--------------|--------|
 | `brak-codegen-obj` | `ObjBackend` (+ `ObjectFormat` enum) | `emit_obj(&LirProgram)` | `.o`/`.obj` (ELF/COFF/Mach-O sesuai host) — **backend utama CLI** |
-| `brak-codegen-c` | `CBackend` | `emit_c(&LirProgram) -> String` | C source |
-| `brak-codegen-wasm` | `WasmBackend` | `emit_wasm(&LirProgram) -> String` | **WAT text**, bukan binary |
-| `brak-codegen-llvm` | `LlvmBackend` | `emit_llvm(&LirProgram) -> String` | LLVM IR `.ll` |
 | `brak-codegen-asm` | `AsmBackend` (+ mod `x86_64`, `regalloc`) | `emit_asm(&LirProgram) -> String` | teks assembly |
 
 `codegen-obj` juga mengekspos modul: `elf` (`write_elf`, `write_elf_executable`),
@@ -411,13 +395,9 @@ Mendeteksi format object (`PE`/`ELF`/`Mach-O`/`COFF`) dan memproduksi executable
 atau DLL tanpa tool eksternal (zero-dependency). Base address default:
 Windows exe `0x140000000`, Linux exe/DLL `0x400000`, Windows DLL `0x180000000`.
 
-### 3.14 `brak-link-wasm` & `brak-link-archive`
+### 3.14 `brak-link-archive`
 
 ```rust
-// wasm
-pub struct WasmLinker;
-pub fn link_wasm(objects: &[ObjectFile], entry: &str) -> Result<LinkerOutput>;
-
 // archive
 pub struct ArchiveEntry { pub name: String, pub data: Vec<u8> }
 pub enum ArchiveFormat { Unix, Windows }
@@ -450,38 +430,7 @@ impl EasyPipeline {
 > Penting: default pipeline `brak-easy` hanya 5 pass
 > `inline, cp, fold, gvn, dce` (satu iterasi) — **bukan** 8 pass seperti CLI.
 
-### 3.16 `brak-polyglot` — FFI ke C & Python
-
-```rust
-pub enum ForeignType { ... }                       // mapping tipe ke luar (C/Python)
-pub struct FfiBinding;                             // satu fungsi publik ter-bound
-impl FfiBinding { pub fn to_c_declaration(&self) -> String; }
-
-pub struct PolyglotBridge;
-impl PolyglotBridge {
-    pub fn brak_to_c(brak_ty: &BrakType) -> ForeignType;
-    pub fn hir_to_c(hir_ty: &HirType) -> ForeignType;
-    pub fn c_to_brak(foreign_ty: &ForeignType) -> Option<BrakType>;
-    pub fn extract_bindings(program: &HirProgram) -> Vec<FfiBinding>;
-}
-
-pub struct CHeaderGenerator;
-impl CHeaderGenerator {
-    pub fn generate_string(bindings: &[FfiBinding]) -> String;
-    pub fn generate_file(path: &Path, bindings: &[FfiBinding]) -> std::io::Result<()>;
-}
-
-pub struct PyO3Generator;
-impl PyO3Generator {
-    pub fn generate_string(module_name: &str, bindings: &[FfiBinding]) -> String;
-    pub fn generate_project(module_name: &str, bindings: &[FfiBinding], output_dir: &Path) -> std::io::Result<()>;
-    pub fn generate_pyproject(module_name: &str) -> String;
-}
-```
-Di CLI, alur FFI: `brak build file.brk --gen-h file.h` (header C) atau
-`--py-module nama` (buat proyek PyO3 + maturin).
-
-### 3.17 `brak-bitcode` — cache IR (eksperimental)
+### 3.16 `brak-bitcode` — cache IR (eksperimental)
 
 ```rust
 pub struct BitcodeCache;
@@ -635,15 +584,12 @@ Catatan agar tidak terjadi kesalahpahaman saat memakai API:
 |-----|--------------|
 | `brak build` | Bekerja penuh untuk `.brk` → exe; `.lit` didukung; input `.o`/`.a` didukung. Exit code = nilai return entry. Terverifikasi. |
 | `--shared` | DLL Windows didukung (export table nyata). Linux → error jelas (ELF DYN belum). |
-| `--py-module` | Membuat proyek PyO3 yang siap di-build dengan maturin/cargo. |
 | Pipeline default `brak-easy` | 5 pass (inline, cp, fold, gvn, dce) 1 iterasi. |
 | Pipeline CLI `brak build` | 8 pass (tambah licm, jt, tco) 1 iterasi. |
 | Backend output utama | `brak-codegen-obj` (ELF/COFF/Mach-O) + `brak-link-native`. |
-| `brak-codegen-wasm` | Output **WAT text** (`.wat`), bukan binary `.wasm`; butuh wat2wasm. |
 | `brak-codegen-asm` | Ada tapi **tidak dipakai** pipeline (dead code). |
 | `brak-bitcode` | **Eksperimental**, belum terintegrasi CLI/brak-easy. |
 | Bahasa Lit | Hanya fungsi konstanta (`fn x() -> ty = lit;`). |
-| `brk gen-h` (C header) | Berfungsi via `--gen-h`. Header dari fungsi yang diekstrak `extract_bindings`. |
 | Dukungan tipe | `i32 i64 f32 f64 bool string void` + Named struct/enum. Array/Slice di-parse tapi belum usable end-to-end (indexing postfix belum ada). |
 | Float | Operasi `+ - * /` float didukung (FAdd/FSub/FMul/FDiv). Perbandingan float memakai perbandingan bit-pattern i64 (akurat untuk nilai normal). |
 | Struct/Enum | Parsing, lowering, codegen struct dan enum (konstruksi + field) tersedia. |

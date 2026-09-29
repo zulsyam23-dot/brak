@@ -14,7 +14,7 @@ Brak adalah library toolkit untuk membangun bahasa pemrograman yang *fully stand
 
 - **"Everything is a plugin"** — kompiler bukan monolit, tapi rangkaian komponen yang saling berkomunikasi lewat IR.
 - **"Build piece by piece"** — kamu tidak perlu semua komponen untuk memulai. Cukup lexer + parser sudah bisa jalan.
-- **"Polyglot by design"** — library inti Rust. Binding nyata: C headers (`--gen-h`) & Python PyO3 (`--py-module`) via `brak-polyglot`. Binding JS/WASM & Zig 🚧 rencana (belum ada).
+- **Rust-first** — compiler menghasilkan executable dan shared library native; binding bahasa lain bukan bagian dari workspace saat ini.
 
 ---
 
@@ -25,7 +25,7 @@ Sebelum membahas arsitektur, berikut masalah konkret di ekosistem compiler yang 
 | # | Masalah | Dampak | Solusi Brak |
 |---|--------|--------|-------------|
 | 1 | **LLVM terlalu berat** — 50MB+ dependensi, 30 menit compile | Developer bahasa kecil enggan pakai compiler toolkit | `brak-core` + `brak-codegen-obj` hanya ~500KB, compile < 5 detik |
-| 2 | **FFI antar bahasa itu painful** — butuh C header, ABI mapping, marshaling kode | Isolasi ekosistem, sulit integrasi | IR-level FFI: 2 bahasa via Brak bisa call langsung tanpa glue code |
+| 2 | **Integrasi antar bahasa itu kompleks** — butuh ABI mapping dan marshaling | Isolasi ekosistem, sulit integrasi | Belum didukung oleh workspace saat ini |
 | 3 | **IR tidak human-readable** — LLVM IR padat, WASM binary, tidak bisa di-diff | Debugging compiler sulit, test susah | Brak IR = JSON/YAML (via `emit-ir --format`), bisa diff, patch, grep |
 | 4 | **Compiler testing itu ad-hoc** — tiap project reinvent test infra | Banyak bug compiler tidak terdeteksi | `brak-test` 📦: snapshot testing, diagnostic testing, execution & differential testing (initial). Fuzzing = 🚧 |
 | 5 | **Grammar terputus dari compiler** — ANTLR grammar ≠ IR types | Double maintenance, mismatch | `brak-syntax` 🚧 **rencana** — satu grammar → parser + IR types + formatter + LSP rules (belum ada di kode) |
@@ -51,11 +51,9 @@ LLVM dirancang untuk C++ dan Clang — compiler industrial ukuran raksasa. Untuk
 
 **Solusi Brak**: Arsitektur Lego brick. Ambil komponen yang kamu butuh aja.
 
-#### 2.1.2 Masalah: Isolasi Ekosistem Bahasa
+#### 2.1.2 Integrasi Antar Bahasa Belum Didukung
 
-Setiap bahasa punya ekosistem sendiri. Python punya C extensions, Rust punya FFI, JS punya NAPI. Mau panggil fungsi Python dari Rust? Tulis binding, manage reference count, handle GIL, convert types. Tiap bahasa ulang dari nol.
-
-**Solusi Brak**: Semua bahasa yang compile ke Brak IR otomatis bisa call satu sama lain. Brak IR punya type system seragam, calling convention standar, dan linker yang handle semuanya. Ini bukan teori — Brak IR-lah yang jadi "lingua franca".
+Workspace saat ini berfokus pada kompilasi native. Pembuatan binding dan pemanggilan fungsi lintas bahasa berada di luar cakupan implementasi saat ini.
 
 #### 2.1.3 Masalah: Compiler Testing Tidak Terstandarisasi
 
@@ -98,16 +96,12 @@ Lihat proyek compiler kecil di GitHub: testing biasanya "compile file ini, lihat
 │  brak-codegen       (Code Generation)                    │
 │  ├── brak-codegen-asm    (NASM/MASM textual asm)       │
 │  ├── brak-codegen-obj    (direct .obj/.o)              │
-│  ├── brak-codegen-llvm   (LLVM IR bridge — optional)   │
-│  ├── brak-codegen-c      (transpile-to-C fallback)     │
-│  └── brak-codegen-wasm   (WASM output)                 │
 └────────────────────┬────────────────────────────────────┘
                      │ binary / library
                      ▼
 ┌─────────────────────────────────────────────────────────┐
 │  brak-link          (Linker)                             │
 │  ├── brak-link-native   (PE/ELF/Mach-O)                 │
-│  ├── brak-link-wasm     (WASM module)                   │
 │  └── brak-link-archive  (.a / .lib)                     │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -208,30 +202,15 @@ pub trait LirOptimizationPass: Send + Sync {
     - **PE (Portable Executable)** untuk Windows (COFF + CodeView)
     - **Mach-O** untuk macOS
     - Opcode yang belum didukung → error eksplisit (bukan silent)
-  - `brak-codegen-llvm`: Lir → LLVM IR (opsional, heavy)
-  - `brak-codegen-c`: Lir → C source readable (portability fallback)
-  - `brak-codegen-wasm`: Lir → **WAT text**, bukan binary `.wasm`
 - **DebugInfo** 🚧 sebagian: DWARF/CodeView ada di codegen-obj & linker tapi belum matang/terverifikasi penuh
 
 ### 4.6 `brak-link` — Linker
 
 - `brak-link-traits` — trait `LinkerBackend`, struct `ObjectFile` & `LinkerOutput`
 - `brak-link-native` — linker untuk PE (Windows, exe **dan** DLL), ELF (Linux exe; ELF DYN 🚧), Mach-O (macOS)
-- `brak-link-wasm` — linker WASM
 - `brak-link-archive` — static library creator + parser (.a / .lib; input archive dipakai CLI)
 - **No external linker needed** — Brak punya linker sendiri dari awal
 - **LTO (Link-Time Optimization)** 🚧 — belum ada; optimasi berjalan di level LIR sebelum codegen
-
-### 4.7 `brak-polyglot` — FFI (bukan `brak-ffi-*`)
-
-Realita: FFI diimplementasi lewat **`brak-polyglot`**, bukan crate `brak-ffi-*` terpisah.
-Crate `brak-ffi-c/python/wasm/zig` **belum ada**.
-
-- `PolyglotBridge` — normalisasi tipe (Brak ↔ C) + `extract_bindings` dari HIR
-- `CHeaderGenerator` — generate C header
-- `PyO3Generator` — generate proyek Python extension (PyO3) yang siap `maturin develop`
-- Binding WASM/Zig 🚧
-- **Stable ABI guarantee** 🚧 — klaim belum bisa divalidasi (belum ada komitmen ABI lintas versi)
 
 ### 4.8 `brak-tool` — CLI
 
@@ -240,7 +219,7 @@ Crate `brak-ffi-c/python/wasm/zig` **belum ada**.
 - `brak.config.toml` loading 🚧 belum ada
 - **Multi-language support**: via ekstensi file — `.brk` (Brak) dan `.lit` (Lit). Flag `--lang` 🚧 belum ada
 - **IR inspection**: `brak emit-ir file.brak --level hir --format json` 📦
-- Build: `--entry`, `--output`, `--shared` (DLL), `--gen-h`, `--py-module`, `--opt-pass`, `--opt-iterations`, `--verbose-opt`
+- Build: `--entry`, `--output`, `--shared` (DLL), `--opt-pass`, `--opt-iterations`, `--verbose-opt`
 
 ### 4.9 `brak-syntax` — Definisi Syntax (opsional) 🚧 BELUM ADA
 
@@ -259,31 +238,6 @@ Fitur yang sudah ada (semua Rust API, bukan Python):
 - **Diagnostic Testing**: `DiagnosticTester::assert_has_error` / `assert_has_warning`
 - **Execution & Differential Testing (initial)**: `ExecutionTester::assert_output(exe, expected)`
 - 🚧 **FileCheck-style matching**, **Differential Fuzzing**, **Regression Database** — belum ada
-
-### 4.11 `brak-polyglot` — Polyglot FFI Framework
-
-FFI nyata untuk memanggil fungsi Brak dari bahasa lain:
-
-1. Fungsi publik diekstrak dari HIR (`PolyglotBridge::extract_bindings`)
-2. Tipe dinormalisasi (`brak_to_c`, `hir_to_c`, `c_to_brak`)
-3. Generator menghasilkan **C header** (`CHeaderGenerator`) atau **proyek PyO3** (`PyO3Generator`)
-
-```rust
-// lib.brk — fungsi Brak yang diekstrak menjadi binding
-fn add(a: i32, b: i32) -> i32 { a + b }
-```
-
-Pemakaian via CLI:
-```bash
-brak build lib.brk --gen-h lib.h --shared   # header C + DLL
-brak build lib.brk --py-module liblib -o py_liblib/   # proyek Python
-# lalu: cd py_liblib && maturin develop → import liblib
-```
-
-Realita: cross-language call **di dalam satu binary** (`.brk` ↔ `.lit`) bekerja lewat IR
-perantara yang sama (contoh `samples/cross_lit.brk`). Normalisasi calling convention
-**di level LIR untuk pemanggilan antar bahasa brak**, sedangkan keluar ke C/Python
-via C ABI (Win64/SystemV) + header.
 
 ---
 
@@ -361,27 +315,10 @@ lexer `AsciiLexer` + parser `Parser` di `brak-frontend`.
   terintegrasi** ke CLI maupun `brak-easy`.
 - Parser/backed caching per-function ("hanya fungsi yang berubah") 🚧 belum ada.
 
-### 5.5 Polyglot FFI Zero-Cost
+### 5.5 Cross-language Integration — Not Supported
 
-Brak menghilangkan dichotomi "ekosistem bahasa". Semua bahasa Brak itu satu keluarga:
-
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ MyLang      │  │ YourLang    │  │ TheirLang   │
-│ (brak IR)   │  │ (brak IR)   │  │ (brak IR)   │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       ▼                ▼                ▼
-┌─────────────────────────────────────────────────────┐
-│                  Brak Linker                        │
-│  Resolve cross-language calls at LIR level          │
-│  Single binary, no FFI overhead                     │
-└─────────────────────────────────────────────────────┘
-```
-
-**Use case real saat ini**: `.brk` dan `.lit` di-compile ke IR yang sama lalu
-di-link jadi satu binary — fungsi Lit bisa dipanggil dari Brak tanpa glue code
-(contoh `samples/cross_lit.brk`). Keluar ke bahasa lain (C/Python) via C ABI + header.
+Workspace saat ini hanya mendukung kompilasi program Brak dan Lit ke executable native.
+Binding dan pemanggilan fungsi dari bahasa lain belum didukung.
 
 ### 5.6 Testing Framework Built-in
 
@@ -408,8 +345,6 @@ struct LirInst {
 
 Status nyata backend:
 - `codegen-obj` → DWARF sections di ELF/Mach-O & CodeView di PE 🚧 **sebagian, belum terverifikasi penuh** (prioritas.md Fase 6 backlog)
-- `codegen-c` → `#line` directives 📦
-- `codegen-wasm` → DWARF wasm 🚧 tidak ada
 - `codegen-asm` → comment with source location 🚧 tidak ada
 
 ### 5.8 Multi-Tier Compilation 🚧 BELUM ADA
@@ -454,7 +389,6 @@ brak-core (zero deps — tipe dasar, Span, Diagnostic, ContentHash)
   │     └── brak-codegen-* (dep: brak-codegen-traits)
   ├── brak-link-traits (dep: brak-core)
   │     └── brak-link-* (dep: brak-link-traits)
-  ├── brak-polyglot (dep: brak-core, brak-ir-hir)
   ├── brak-lang-lit (dep: brak-ir-hir)
   ├── brak-test (dep: brak-core, brak-ir-*)
   ├── brak-bitcode (dep: brak-ir-*)          — eksperimental
@@ -510,37 +444,6 @@ let exe = NativeLinker.link(
     "main", 0x140000000,
 )?;
 std::fs::write("output.exe", exe.data)?;
-```
-
-### 7.2 C — lewat header yang di-generate 📦
-
-Tidak ada C API *session* (pola `brak_session_*` belum ada). Jalur C = compile Brak
-ke shared library + generate header, lalu pakai dari C:
-
-```bash
-brak build lib.brk --shared --gen-h lib.h -o lib.dll
-```
-
-```c
-#include "lib.h"   /* hasil generate: deklarasi fungsi publik Brak */
-
-int main(void) {
-    return add(10, 20);
-}
-```
-
-### 7.3 Python — via PyO3 yang di-generate 📦
-
-Modul `brak` Python (pola `from brak import Session`) **belum ada**. Jalur nyata:
-
-```bash
-brak build lib.brk --py-module liblib -o py_liblib/
-cd py_liblib && maturin develop
-```
-
-```python
-import liblib
-liblib.add(10, 20)   # memanggil fungsi Brak yang diekspor
 ```
 
 ---
@@ -628,20 +531,13 @@ cache.clear_all();
 - [x] `brak-test` — Execution & Differential Testing (Initial)
 - [x] `brak emit-ir --format json|yaml`
 
-### Phase 6 — Polyglot & FFI (`v0.7`) — 3-4 minggu
-- [x] `brak-polyglot` — Multi-language type normalization
-- [x] Cross-language call (LIR level & x86_64 backend)
-- [x] FFI binding generation (C headers)
-- [x] Support for `extern fn` in frontend and lowering
-- [x] Initial PyO3 binding generator infrastructure
-- [x] Advanced PyO3 support (Python binding)
-- [x] **Milestone: Dua bahasa sample saling call tanpa FFI**
+### Phase 6 — Polyglot & FFI (`v0.7`) — REMOVED
 
-### Phase 7 — More Backends (`v0.8`) — 3-4 minggu
-- [x] `brak-codegen-wasm` — output **WAT text** (bukan binary `.wasm`; butuh wat2wasm)
-- [x] `brak-codegen-c` — idiomatic C transpiler
-- [x] `brak-codegen-llvm` — LLVM IR bridge (opsional, `.ll` struktural valid)
-- [x] `brak-link-wasm` — WASM module linker (remap type index nyata)
+Fitur integrasi bahasa dan generator binding tidak termasuk dalam workspace saat ini.
+
+### Phase 7 — More Backends (`v0.8`) — REMOVED
+
+Backend non-native tambahan tidak termasuk dalam workspace saat ini.
 - [x] `brak-bitcode` — persistent IR cache 🚧 **eksperimental** (JSON, belum terintegrasi)
 
 ### Phase 8 — Debug Info (`v0.9`) — 🚧 SEBAGIAN (per prioritas.md)
@@ -650,7 +546,6 @@ cache.clear_all();
 > Kode sebagian sudah ada (`dwarf.rs`, `codeview.rs`, `pe.rs`), tapi **belum terverifikasi penuh**
 > dengan debugger dan tidak boleh dianggap selesai.
 
-- [x] `#line` directives di codegen-c — `CWriter::emit_inst()` emits `#line` on line change
 - [~] DWARF generation di codegen-obj (ELF & Mach-O .o) — `dwarf.rs` + `elf.rs`/`macho_obj.rs`
   - [~] `.debug_line`, `.debug_info`, `.debug_abbrev`, `.debug_str` di relocatable .o
   - [~] DWARF di ELF executable — `link_elf()` writes DWARF section headers + data
@@ -671,8 +566,7 @@ cache.clear_all();
 - [x] Inlining, LICM, TCO (self tail-call nyata), Jump Threading, Constant Folding
 - [x] Iterative optimization pass manager (convergence via ContentHash)
 - [~] Self-hosting (Brak compile Brak) — infrastruktur siap (struct/enum), **belum diverifikasi** (lihat §5.10)
-- [~] Stabil ABI untuk C bindings (via brak-polyglot) — binding tersedia, klaim stabilitas lintas versi belum divalidasi
-- [x] Documentation: README, LANG_BRAK, LANG_LIT, POLYGLOT_GUIDE, daftar_api.md
+- [x] Documentation: README, LANG_BRAK, LANG_LIT, daftar_api.md
 - [x] `brak-easy` — pipeline level tinggi untuk konsumen library
 - [ ] Benchmark suite vs LLVM
 - [ ] SROA — **tidak ada** (crate `brak-opt-sroa` belum pernah dibuat; baris lama salah)
@@ -683,7 +577,7 @@ cache.clear_all();
 1. **Zero magic** — semua komponen bisa diganti user
 2. **Progressive complexity** — user bisa mulai dari lexer aja
 3. **No monolith** — satu crate per tanggung jawab
-4. **Stable ABI** — C binding diutamakan untuk stabilitas
+4. **Stable interfaces** — API crate dijaga konsisten dan eksplisit
 5. **Streaming first** — parser dan lexer bisa handle input besar tanpa load semua ke memory
 6. **Error recovery** — jangan panic, kasih diagnostic yang jelas
 7. **Deterministic** — output harus reproducible (no random, seed-aware)
@@ -745,14 +639,9 @@ brak/
 ├── brak-codegen-traits/   (CodegenBackend, CodegenExecutable)
 ├── brak-codegen-obj/      (ObjBackend — ELF/PE/Mach-O)
 ├── brak-codegen-asm/      (dx86asm) — belum ada consumer
-├── brak-codegen-c/        (CWriter)
-├── brak-codegen-wasm/     (WAT text)
-├── brak-codegen-llvm/     (LLVM IR text)
 ├── brak-link-traits/      (LinkerBackend, ObjectFile)
 ├── brak-link-native/      (PE/ELF/Mach-O linker)
-├── brak-link-wasm/        (WASM module linker)
 ├── brak-link-archive/     (AR static lib)
-├── brak-polyglot/         (normalisasi tipe lintas bahasa, FFI, gen C header & PyO3)
 ├── brak-lang-lit/         (bahasa Lit — konstanta saja, -> cross_lit.brk)
 ├── brak-test/             (IR/diff/exec snapshot testing)
 ├── brak-bitcode/          (eksperimental, serde_json cache)

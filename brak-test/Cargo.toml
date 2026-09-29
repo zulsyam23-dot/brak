@@ -2,6 +2,7 @@
 name = "brak-test"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 brak-core = { path = "../brak-core" }

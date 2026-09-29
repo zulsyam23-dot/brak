@@ -2,6 +2,7 @@
 name = "brak-ir-ast"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Brak AST definition + serde + pretty printer"
 
 [dependencies]

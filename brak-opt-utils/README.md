@@ -1,8 +1,11 @@
 # brak-opt-utils
 
-Kumpulan alat bantu untuk mempermudah pembuatan pass optimasi yang kompleks.
+Utilitas analisis control-flow graph untuk pass optimasi LIR.
 
-## Kegunaan
-- **CFG Analysis**: Membangun graf alur program dari instruksi linear.
-- **Dominance**: Menghitung blok mana yang "mendominasi" blok lain (penting untuk optimasi loop).
-- **Loop Detection**: Menemukan perulangan (loops) dalam kode secara otomatis.
+## API
+
+- `build_cfg` membangun successor dan predecessor antar basic block.
+- `compute_dominance` menghitung immediate dominator; `dominates` menguji relasi dominasi.
+- `find_natural_loops` mencari natural loop dari back-edge yang targetnya mendominasi sumber.
+
+Tipe hasil utama adalah `CfgGraph`, `Dominance`, dan `NaturalLoop`. LICM menggunakan utilitas ini untuk memilih loop dan pre-header. Analisis bekerja pada basic block dan label yang direpresentasikan di LIR.

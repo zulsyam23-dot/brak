@@ -1,6 +1,10 @@
 # brak-codegen-traits
 
-Interface standar untuk semua Backend generator kode di Brak.
+Kontrak bersama untuk backend codegen Brak yang menerima `LirProgram`.
 
-## Kegunaan
-Memastikan semua backend (ASM, C, LLVM, WASM) memiliki cara yang sama untuk menerima LIR dan menghasilkan output, sehingga mudah untuk menambah target CPU baru di masa depan.
+## API
+
+- `CodegenBackend` menyediakan `name()` dan `emit()`, yang menghasilkan byte output atau `brak_core::Result`.
+- `CodegenExecutable` memperluas kontrak tersebut dengan `emit_executable(program, entry)` untuk backend yang dapat menghasilkan executable.
+
+Backend yang tersedia di workspace mencakup object file (`brak-codegen-obj`) dan teks assembly (`brak-codegen-asm`). Trait ini mendefinisikan antarmuka saja; ia tidak memilih target atau menjamin dukungan fitur tertentu pada tiap backend.

@@ -1,11 +1,13 @@
 # brak-core
 
-Modul fondasi yang menyediakan tipe data dan utilitas dasar untuk seluruh toolkit Brak.
+Tipe dasar bersama yang digunakan crate Brak.
 
-## Kegunaan
-- **Source Mapping**: Melacak lokasi kode sumber (file, baris, kolom) untuk pelaporan error yang akurat.
-- **Diagnostics**: Sistem pelaporan Error dan Warning yang cantik dan informatif.
-- **Common Types**: Definisi tipe `Result` dan `Error` standar yang digunakan di semua modul lain.
+## API
 
-## Cara Pemakaian
-Digunakan sebagai dependensi utama oleh hampir semua modul lain di Brak.
+- `Span`, `SourceLoc`, dan `SourceMap` untuk merepresentasikan rentang serta lokasi sumber.
+- `Diagnostic`, `Diagnostics`, dan `Severity` untuk mengumpulkan diagnostic.
+- `ContentHash` untuk hashing konten IR.
+- `Result<T>` sebagai alias `Result` dengan error dinamis.
+- `Version` dan `BRAK_VERSION` untuk versi toolkit.
+
+Crate lain mengandalkan tipe-tipe ini agar format lokasi, diagnostic, dan error konsisten.

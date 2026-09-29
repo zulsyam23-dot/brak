@@ -2,6 +2,7 @@
 name = "brak-link-traits"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "LinkerBackend trait for Brak linker"
 
 [dependencies]

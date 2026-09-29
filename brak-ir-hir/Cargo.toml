@@ -2,6 +2,7 @@
 name = "brak-ir-hir"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Brak High-level IR: desugared, type-checked, name-resolved"
 
 [dependencies]

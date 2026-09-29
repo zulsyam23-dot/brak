@@ -2,6 +2,7 @@
 name = "brak-link-native"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Native linker: ELF, PE, Mach-O"
 
 [dependencies]

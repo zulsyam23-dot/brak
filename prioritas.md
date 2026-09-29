@@ -151,40 +151,7 @@
   `unimplemented!("opcode {:?}")` agar tidak pernah silent lagi.
 - **Test**: Per-opcode round-trip test: LIR → obj → link → run → assert hasil.
 
-### BUG-K10: Backend LLVM menghasilkan IR invalid
-- **Lokasi**: `brak-codegen-llvm/src/lib.rs:130-133,168-171,182-189,315-329`
-- **Root cause**: Parameter SSA di-store "through" dirinya sendiri (`store i64 %r0, i64* %r0`);
-  float typing campur (`icmp ... i64` atas nilai double); `Set*` tanpa `Cmp` pendahulu
-  di blok sama → dest tak terdefinisi.
-- **Dampak**: Semua `.ll` berisi fungsi berparameter gagal verifikasi `llvm-as`/`opt`.
-- **Fix**: Alloca entry-block untuk tiap parameter + store awal (pola clang -O0);
-  reg_type konsisten per-instruksi (tabel tipe per-vreg); Set* fallback `icmp eq i64 0,0`.
-- **Test**: Emit .ll → pipe ke `llvm-as` (jika tersedia) atau verifier minimal; minimal
-  snapshot test struktur.
-
-### BUG-K11: Backend WASM invalid — urutan stack & binary format
-- **Lokasi**: `brak-codegen-wasm/src/lib.rs:263-269` (reinterpret sebelum const),
-  `:199-245` (state Cmp/Set lintas-instruksi rapuh), `:82-96` (offset data vs escaping)
-- **Dampak**: Modul float literal invalid; data overlap saat string berisi quote/newline;
-  import signature hardcoded 6×i64.
-- **Fix**: Push `f64.const` dulu baru reinterpret (atau hapus reinterpret, gunakan i64
-  reinterpret yang benar); Cmp/Set digabung satu pseudo-instruction saat lowering LIR→WASM;
-  escape string saat hitung panjang byte. Binary encoding penuh (type/function/memory/
-  export/code sections) menggantikan output WAT-as-.wasm — atau rename output `.wat`.
-- **Test**: Parse ulang output dengan parser minimal; float program end-to-end.
-
 ## Level H — HIGH
-
-### BUG-H01: Linker WASM korup (remap index tidak diimplementasi)
-- **Lokasi**: `brak-link-wasm/src/lib.rs:142-148,164-197,90-103,265`
-- **Detail**: remapped_indices hanya copy verbatim meski type section deduped/reordered;
-  code bodies diambil sebagai section utuh termasuk count prefix lalu dibungkus count lagi
-  (double-nested); section memory/global/data dibuang; `rename_export` pad NUL tanpa ubah
-  length LEB128 → nama export `"main\0\0"`.
-- **Fix**: Implement true remap: map old_type_idx→new via HashMap saat dedup; parse
-  per-body (count, size, bytes) lalu rebuild; preserve semua section; rename = re-encode
-  LEB128 length.
-- **Test**: Merge 2 modul fixture; validasi dengan decode LEB128 manual / wasm-tools jika ada.
 
 ### BUG-H02: `--shared` menghasilkan executable, bukan shared library
 - **Lokasi**: `brak-tool/src/main.rs:355-362`
@@ -289,30 +256,12 @@
 - **Fix**: Escape state machine saat lex; simpan decoded value; unknown escape = error.
 - **Test**: String dengan semua escape standar.
 
-### BUG-M05: C backend field access lewat fake struct — memory corruption
-- **Lokasi**: `brak-codegen-c/src/lib.rs:63,370,379,400,118,289`
-- **Detail**: GetField/SetField cast ke `_GenericStruct{int64_t[1024]}` sementara
-  StructInit pakai struct asli → offset disagree untuk struct kecil; extern decl dipaksa
-  6×int64; calloc tak pernah free; `#line 0` invalid.
-- **Fix**: Cast ke struct asli (struct decl harus selalu diemitsi); extern pakai signature
-  asli dari LIR; `#line 1`; free strategy: arena per-func (dokumentasikan leak policy).
-- **Test**: gcc/clang compile output + run; struct kecil (<1024 byte) field write/read.
-
 ### BUG-M06: Bitcode cache dead code + klaim docs palsu
 - **Lokasi**: `brak-bitcode/src/lib.rs` — zero external uses; README.md:82, prd.md Phase 7
 - **Fix**: Integrasi ke brak-tool: key = hash(source + compiler version); on-hit skip
   frontend→opt untuk file unchanged. Kalau tidak diintegrasikan bulan ini: tandai crate
   experimental di README (kejujuran performa).
 - **Test**: Build 2×, hitungan frontend invocation turun.
-
-### BUG-M07: Polyglot generator rusak
-- **Lokasi**: `brak-polyglot/src/lib.rs:204-223,265`; guide mismatch POLYGLOT_GUIDE.md
-- **Detail**: TOML+Rust digabung satu string dengan separator komentar; String→usize di
-  PyO3 (Python terima integer, bukan str); bool→int8 mismatch; subcommand `polyglot` di
-  docs tidak ada di CLI.
-- **Fix**: `generate_project` tulis 2 file ke output_dir; type mapping String→`&str`/
-  `String`, bool→bool; docs update atau implement subcommand (wrapper tipis di brak-tool).
-- **Test**: Generated project cargo build sukses.
 
 ### BUG-M08: Register allocator linear scan (upgrade dari BUG-K08 fase 1)
 - **Lokasi**: `brak-codegen-obj/src/x86_64.rs` + crate regalloc
@@ -371,14 +320,13 @@
 - **Fix**: Wajib semicolon (error jelas); struct-init heuristic perluas (Ident `{` dengan
   lookahead bukan stmt-start); recovery sync ke delimiter statement; match span real.
 
-### BUG-M16: LIR BitNot semantics inconsistent
-- **Lokasi**: `brak-ir-lir/src/lower.rs:287` (TODO); asm = bitwise not, wasm/llvm/c = eqz
-- **Fix**: BitNot → XOR all-ones di semua backend; Not logis tetap eqz. Definisikan keduanya
-  di IR sebagai op terpisah.
-- **Test**: `~5` = −6 di semua backend.
+### BUG-M16: LIR BitNot semantics belum terdefinisi konsisten
+- **Lokasi**: `brak-ir-lir/src/lower.rs:287` (TODO)
+- **Fix**: Definisikan BitNot sebagai XOR all-ones dan pisahkan dari operasi Not logis.
+- **Test**: `~5` = −6 setelah semantics bitwise ditetapkan.
 
 ### BUG-M17: Float pipeline tidak nyata
-- **Lokasi**: backends mendeteksi float via heuristic operand ImmF64 (`c/lib.rs:147-182`)
+- **Lokasi**: backend mendeteksi float via heuristic operand ImmF64
 - **Detail**: BinOp semua integer; mixed float math miscompiles.
 - **Design**: Tambah typed BinOps (`FAdd/FSub/FMul/FDiv`) di MIR/LIR; backends dispatch
   per-type. Besar — jadwalkan fase tersendiri (Fase 6).
@@ -401,7 +349,6 @@
 | D01 | Tipe `I32/I64/F64/Bool/String` kapital | docs/LANG_BRAK.md | Parser hanya terima lowercase → semua contoh doc gagal compile | Update docs ke lowercase |
 | D02 | "Smart Caching — instant compilation" | README.md:82 | Cache unused (BUG-M06) | Integrasi atau hapus klaim |
 | D03 | Lit language lengkap (`let`, binop, calls) | docs/LANG_LIT.md:8-20 | Grammar hanya constant fn | Update docs ke grammar nyata |
-| D04 | `brak polyglot --lang python` | POLYGLOT_GUIDE.md:43-47 | Subcommand tidak ada | Implement atau fix docs |
 | D05 | Output ".exe, .dll, .a" | README.md:37 | Hanya .exe benar (H02,H03,M09) | Tandai roadmap |
 | D06 | MessagePack+Zstd cache | prd.md:550 | serde_json plaintext | Update prd |
 | D07 | Differential fuzzing, DWARF/PDB, binding JS/Zig | prd.md §4.10, Phase 5+ | Tidak ada | Pindahkan ke backlog |
@@ -487,7 +434,6 @@ WASM binary encoder (output WAT di-dokumentasikan).
 |-----|---------|----------|--------|
 | H04 | addend relocation | 1d | ✅ `apply_reloc_with_addend`: `S+A` / `S+A-P`; addend ELF kini dipakai |
 | H06,H07 | entry error, COFF binding | 0.5d | ✅ Entry hilang = `"undefined entry symbol: 'main'"` (terverifikasi di samples/math_lib); COFF hanya EXTERNAL(2)=global |
-| H01 | linker WASM remap + rebuild | 2d | ✅ FIXED — parse per-fungsi (bodies, bukan section mentah), type-index remapping nyata via interning, Memory/Global/Data dipertahankan, `rename_export` rebuild LEB128 benar (NUL padding hilang). Test: merge dua modul + rename nama lebih panjang |
 | M09,H03 | archive real symbol table + parse input archive | 2d | ✅ Writer: simbol global TERDEFINISI diindeks dengan offset member nyata (di-parse dari ELF/COFF/Mach-O). Reader `parse_archive` + wiring brak-tool. Test: roundtrip, symbol index dari object asli, link-from-archive e2e |
 | H02 | --shared PE DLL | 1.5d | ✅ FIXED — `link_pe_shared()`: IMAGE_FILE_DLL characteristic, tanpa entry stub, **export directory lengkap** (address/name/ordinal tables + names blob). Diverifikasi LoadLibraryW + GetProcAddress + pemanggilan add/mul dari host = hasil benar. ELF ET_DYN → error jelas (backlog) |
 | H09,M06,L01,L04 | PE IAT, bitcode, misc | 2d | ✅ Semua: DataDirectory[1]/[12] benar; brak-bitcode EXPERIMENTAL; strtab missing = error; lib_name first-wins |
@@ -506,8 +452,7 @@ WASM binary encoder (output WAT di-dokumentasikan).
 | H05(1,4,5,7) | scopes, literal typing, And/Or, dup fn | 2d | ✅ ScopeStack lexikal per-block (shadowing + out-of-scope terdeteksi); untyped-int literal menyatu dengan i32/i64 pada let/binop/return (`let x: i64 = 5;` ✓ e2e); And/Or = Bool hanya jika kedua operand Bool (bitwise untuk int); duplikat fn = error. Test: `test_typeck_block_scoping`, `test_typeck_int_literal_unifies_with_i64`, `test_typeck_duplicate_function` |
 | H05-2 | missing-return | 1d | ✅ `block_terminates`: Return / trailing-expr (implicit return) / if-kedua-cabang-terminate / loop |
 | M02,M04,M15 | precedence, escapes, parser misc | 2d | ✅ M02: `..` kini lowest-binding. M04: escape string (`\"`, `\\`, `\n`, `\t`) di lexer + decode di parser. M15 sebagian: struct-init heuristic & recovery cascade masih ada (jarang terpicu) |
-| D01-D10 | sinkronisasi docs | 1d | ✅ LANG_BRAK: tipe lowercase + catatan status enum/match; LANG_LIT: grammar nyata (fn konstanta); POLYGLOT_GUIDE: subcommand benar (`build --py-module`), tabel tipe jujur (String→pointer), `extern fn` bukan `extern "C"`; README: klaim caching/pass count jujur |
-| M07 | polyglot generator | 1d | ✅ `generate_project` kini menulis Cargo.toml & src/lib.rs TERPISAH ke direktori output (dulu satu string digabung) |
+| D01-D03,D05-D10 | sinkronisasi docs | 1d | ✅ LANG_BRAK: tipe lowercase + catatan status enum/match; LANG_LIT: grammar nyata (fn konstanta); README: klaim caching/pass count jujur |
 
 **Catatan**: `arr[i]` / method-call postfix (M03) belum didukung parser — Array/Slice
 types tetap unusable end-to-end; dicatat sebagai fitur backlog, docs tidak mengklaim.

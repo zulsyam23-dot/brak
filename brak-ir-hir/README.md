@@ -1,8 +1,11 @@
 # brak-ir-hir
 
-**High-level Intermediate Representation (HIR)**.
+High-level Intermediate Representation Brak, berikut lowering AST dan pemeriksaan tipe.
 
-## Kegunaan
-- **Type Checking**: Tahap di mana compiler memastikan bahwa Anda tidak menambahkan angka dengan teks, atau memanggil fungsi yang tidak ada.
-- **Desugaring**: Menyederhanakan struktur kode yang kompleks menjadi lebih sederhana tanpa menghilangkan makna aslinya.
-- **Validation**: Memastikan semua variabel sudah didefinisikan sebelum digunakan.
+## Tahap
+
+- `HirLower` mengubah AST menjadi struktur HIR.
+- `TypeChecker` memeriksa konsistensi tipe dan menghasilkan diagnostic untuk program yang tidak valid.
+- HIR menjadi input `MirLower` pada tahap berikutnya.
+
+HIR mempertahankan struktur tingkat tinggi yang masih berguna untuk validasi sebelum lowering ke control-flow graph MIR.

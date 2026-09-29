@@ -75,24 +75,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brak-codegen-c"
-version = "0.1.0"
-dependencies = [
- "brak-codegen-traits",
- "brak-core",
- "brak-ir-lir",
-]
-
-[[package]]
-name = "brak-codegen-llvm"
-version = "0.1.0"
-dependencies = [
- "brak-codegen-traits",
- "brak-core",
- "brak-ir-lir",
-]
-
-[[package]]
 name = "brak-codegen-obj"
 version = "0.1.0"
 dependencies = [
@@ -106,15 +88,6 @@ dependencies = [
 name = "brak-codegen-traits"
 version = "0.1.0"
 dependencies = [
- "brak-core",
- "brak-ir-lir",
-]
-
-[[package]]
-name = "brak-codegen-wasm"
-version = "0.1.0"
-dependencies = [
- "brak-codegen-traits",
  "brak-core",
  "brak-ir-lir",
 ]
@@ -240,14 +213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brak-link-wasm"
-version = "0.1.0"
-dependencies = [
- "brak-core",
- "brak-link-traits",
-]
-
-[[package]]
 name = "brak-opt-cp"
 version = "0.1.0"
 dependencies = [
@@ -255,15 +220,6 @@ dependencies = [
  "brak-ir-lir",
  "brak-opt-traits",
  "brak-opt-utils",
-]
-
-[[package]]
-name = "brak-opt-custom-example"
-version = "0.1.0"
-dependencies = [
- "brak-core",
- "brak-ir-lir",
- "brak-opt-traits",
 ]
 
 [[package]]
@@ -348,16 +304,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brak-polyglot"
-version = "0.1.0"
-dependencies = [
- "brak-core",
- "brak-ir-ast",
- "brak-ir-hir",
- "serde",
-]
-
-[[package]]
 name = "brak-test"
 version = "0.1.0"
 dependencies = [
@@ -379,11 +325,8 @@ version = "0.1.0"
 dependencies = [
  "brak-bitcode",
  "brak-codegen-asm",
- "brak-codegen-c",
- "brak-codegen-llvm",
  "brak-codegen-obj",
  "brak-codegen-traits",
- "brak-codegen-wasm",
  "brak-core",
  "brak-frontend",
  "brak-ir-ast",
@@ -394,7 +337,6 @@ dependencies = [
  "brak-link-archive",
  "brak-link-native",
  "brak-link-traits",
- "brak-link-wasm",
  "brak-opt-cp",
  "brak-opt-dce",
  "brak-opt-fold",
@@ -404,7 +346,6 @@ dependencies = [
  "brak-opt-licm",
  "brak-opt-tco",
  "brak-opt-traits",
- "brak-polyglot",
  "brak-test",
  "clap",
  "serde_json",

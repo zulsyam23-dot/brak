@@ -1,11 +1,11 @@
 # Panduan Bahasa Brak (.brk)
 
-Brak adalah bahasa pemrograman utama dalam toolkit ini. Ia dirancang untuk menjadi bahasa sistem yang aman, modular, dan memiliki performa tinggi.
+Brak adalah bahasa yang dikompilasi oleh toolkit ini. Bahasa dan compiler masih berkembang; contoh di bawah menggunakan sintaks yang didukung pipeline saat ini.
 
 ## Sintaks Dasar
 
 ### 1. Fungsi
-Fungsi didefinisikan dengan kata kunci `fn`. Setiap fungsi harus memiliki tipe kembalian eksplisit (gunakan `Void` jika tidak ada).
+Fungsi didefinisikan dengan kata kunci `fn`. Tipe kembalian ditulis eksplisit; gunakan `void` untuk fungsi tanpa nilai kembalian.
 
 ```brak
 fn add(a: i32, b: i32) -> i32 {
@@ -97,13 +97,15 @@ while i < 5 {
 - `f32`, `f64`: Bilangan desimal (float) 32-bit dan 64-bit.
 - `bool`: Nilai kebenaran (`true` atau `false`).
 - `string`: Teks (UTF-8).
-- `Void`: Digunakan untuk fungsi yang tidak mengembalikan nilai.
+- `void`: Digunakan untuk fungsi yang tidak mengembalikan nilai.
+
+Operasi float dan beberapa fitur tipe agregat masih memiliki keterbatasan di tahap codegen; keberhasilan parse/type-check tidak menjamin semua operasi tersedia end-to-end.
 
 ## Praktik Terbaik (Best Practices)
 
 1. **Gunakan Penamaan Konsisten**: Gunakan `PascalCase` untuk Struct/Enum dan `snake_case` untuk fungsi/variabel.
-2. **Modularitas**: Pecah kode menjadi fungsi-fungsi kecil. Brak memiliki optimizer inlining yang sangat efisien, jadi jangan takut dengan overhead panggilan fungsi.
-3. **Pengecekan Tipe**: Selalu perhatikan pesan error dari kompilator. Brak melakukan analisis statis yang mendalam di level HIR untuk mencegah error runtime.
+2. **Modularitas**: Pecah program menjadi fungsi-fungsi kecil; optimizer dapat melakukan inlining pada sebagian call site yang memenuhi syarat.
+3. **Pengecekan Tipe**: Perhatikan diagnostic dari compiler. Type checking mendeteksi sejumlah kesalahan statis, tetapi tidak menjamin bebas dari semua error runtime.
 4. **Alur Kerja Aman**: Sebelum melakukan build final, gunakan `--level mir` untuk melihat apakah logika CFG (Control Flow Graph) sudah sesuai dengan ekspektasi Anda.
 
 ## Cara Kompilasi

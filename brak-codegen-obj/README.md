@@ -1,8 +1,13 @@
 # brak-codegen-obj
 
-Pembuat file objek standar industri.
+Backend codegen utama Brak untuk menghasilkan object file dari LIR.
 
-## Kegunaan
-- Menghasilkan file `.o` atau `.obj`.
-- Mendukung format **ELF** (Linux), **PE** (Windows), dan **Mach-O** (macOS).
-- Menyertakan informasi debug (DWARF/CodeView) agar error bisa dilacak kembali ke baris kode asli.
+## Format
+
+- ELF melalui `ObjectFormat::Elf`.
+- COFF melalui `ObjectFormat::Coff`.
+- Mach-O melalui `ObjectFormat::Macho`.
+
+`ObjBackend::default()` memilih format berdasarkan host. Gunakan `ObjBackend::emit` atau helper `emit_obj` untuk menghasilkan byte object file; linking dilakukan terpisah oleh `brak-link-native`.
+
+Modul DWARF dan CodeView tersedia, tetapi dukungan debug info masih parsial dan belum diverifikasi penuh dengan debugger nyata.
